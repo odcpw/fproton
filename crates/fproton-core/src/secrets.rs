@@ -304,12 +304,10 @@ mod tests {
     #[test]
     fn live_secret_service_answers_every_read_only_probe() {
         if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
-            eprintln!("no session bus: skipping the live Secret Service probe");
-            return;
+            return; // no session bus here: nothing to probe, nothing to claim
         }
         if crate::proc::which(PROGRAM).is_none() {
-            eprintln!("no busctl: skipping the live Secret Service probe");
-            return;
+            return; // no busctl here: nothing to probe, nothing to claim
         }
         let probe = read_alias_default().expect("ReadAlias answers");
         assert_eq!(probe.alias, "default");

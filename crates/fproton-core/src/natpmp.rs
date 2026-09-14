@@ -269,8 +269,7 @@ mod tests {
         ));
         let ctx = Context::for_test(&dir).expect("test context");
         if ctx.paths.sysfs_device(crate::TUNNEL_DEVICE).exists() {
-            eprintln!("proton0 exists: skipping the no-tunnel assertion");
-            return;
+            return; // a tunnel is up: this assertion is about the no-tunnel path only
         }
         let e = request_port(&ctx, &CancelToken::new()).unwrap_err();
         assert_eq!(e.exit_code(), 6);
