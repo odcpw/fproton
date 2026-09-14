@@ -5,14 +5,16 @@ Proton VPN for Omarchy. One binary: CLI, doctor, TUI, and the backend of the
 `oliver.protonvpn` bar widget.
 
 BUILD STAGE
-  This binary is the Phase-1b core. What is verified end to end on this machine:
-  status, servers, countries, cities, index, settings, history, recents, capabilities,
-  robot-docs, version, setup --dry-run, disconnect --force (a no-op while nothing is
-  up) and port's no-tunnel error.
+  Every command is implemented; they differ in how much has been verified.
+  Verified end to end on this machine: status, servers, countries, cities, index,
+  settings, history, recents, capabilities, robot-docs, version, tui, doctor,
+  setup --dry-run, disconnect --force (a no-op while nothing is up) and port's
+  no-tunnel error.
   Verified only on their timeout/error path, because the official Proton CLI hangs on
   this machine: connect, reconnect, disconnect, config list|get|set, account, signout.
-  Never verified, and claimed nowhere: a successful connect, a granted forwarded port,
-  and every `wg` subcommand. `tui` and `doctor` are Phase-2 stubs that exit 1.
+  Never verified, and claimed nowhere: a successful connect or reconnect, a granted
+  forwarded port, every `wg` subcommand, and the doctor's dns_when_connected and
+  tunnel_route_ok checks, which skip while proton0 is down.
 
 FIRST CALL
   fproton status --json      Everything about the current state, in one object.

@@ -72,7 +72,7 @@ run 0 "capabilities" -- "$BIN" capabilities
 jq_is '.ok' 'true' "capabilities is a valid envelope"
 jq_is '.commands | length' '23' "capabilities lists every command"
 jq_is '.exit_codes | length' '15' "capabilities lists every exit code"
-jq_is '.build_stage' 'phase-1b-core' "capabilities names this build stage"
+jq_is '.build_stage' 'v0.1-integrated' "capabilities names this build stage"
 run 0 "robot-docs" -- "$BIN" robot-docs
 [[ "${OUT:0:8}" == "fproton " ]] && ok "robot-docs prints the handbook" || bad "robot-docs printed something else"
 run 0 "version --json" -- "$BIN" version --json
@@ -188,12 +188,55 @@ else
   ok "--no-color disables colour"
 fi
 
+# An argument clap itself rejects must still land in the §2 error envelope: a piping
+# agent gets one JSON object for EVERY failure, a bad flag value included.
+head_ "clap's own errors honour the JSON contract (§2)"
+clap_err() { # clap_err <label> <expected-hint> <argv...>
+  local label="$1" want_hint="$2"; shift 2
+  local out code
+  out="$("$@" 2>&1)"; code=$?
+  if ! jq -e '.ok == false and .code == 2 and .code_name == "usage"' >/dev/null 2>&1 <<<"$out"; then
+    bad "$label is not a usage envelope" "${out:0:160}"
+    return
+  fi
+  local hint; hint="$(jq -r '.hint' <<<"$out")"
+  if [[ "$code" == 2 && "$hint" == "$want_hint" ]]; then
+    ok "$label → exit 2, hint: $hint"
+  else
+    bad "$label — exit $code, hint '$hint', expected 2 / '$want_hint'"
+  fi
+}
+clap_err "an invalid --feature value"  "fproton servers --help"    "$BIN" servers --feature vpn
+clap_err "an unknown subcommand"       "fproton --help"            "$BIN" nosuchcommand
+clap_err "a non-numeric --limit"       "fproton servers --help"    "$BIN" servers --limit abc
+clap_err "a missing subcommand"        "fproton config --help"     "$BIN" config
+clap_err "a missing nested argument"   "fproton config set --help" "$BIN" config set netshield
+# The hint has to be runnable, not merely well-formed (§2).
+if "$BIN" config set --help >/dev/null 2>&1; then
+  ok "the hint a clap error prints is itself a runnable command"
+else
+  bad "the hint 'fproton config set --help' does not run"
+fi
+# --help and --version are successes clap reports as errors; they must stay exit 0.
+for probe in "--help" "--version" "servers --help"; do
+  # shellcheck disable=SC2086
+  if "$BIN" $probe >/dev/null 2>&1; then
+    ok "\`fproton $probe\` still exits 0"
+  else
+    bad "\`fproton $probe\` no longer exits 0"
+  fi
+done
+
 head_ "no secrets in any output (§2)"
 LEAK_FILE="$RUN_DIR/all-output.txt"
 : > "$LEAK_FILE"
+# `doctor --only keyring` (288 ms) is in this list deliberately: it is the one command
+# that reads the Secret Service, so it is the likeliest to leak, and its own group is
+# cheap enough for the fast run. `doctor capabilities` names every check and path.
 for cmd in "status" "servers --limit 5" "countries" "cities --country CH" "index --stats" \
            "settings" "history" "recents" "capabilities" "version" "port" "recents" \
-           "setup --all --dry-run" "disconnect --force --dry-run" "wg list"; do
+           "setup --all --dry-run" "disconnect --force --dry-run" "wg list" \
+           "doctor --only keyring" "doctor --only cache" "doctor capabilities"; do
   # shellcheck disable=SC2086
   "$BIN" $cmd --json >> "$LEAK_FILE" 2>> "$LEAK_FILE"
   # shellcheck disable=SC2086
@@ -209,10 +252,25 @@ if grep -qE '[A-Za-z0-9+/]{43}=' "$LEAK_FILE"; then
   bad "output contains a 44-character base64 blob (key-shaped)"; LEAKS=1
 fi
 (( LEAKS == 0 )) && ok "no command leaks a key, a token or a keyring path"
-if grep -q "/.local/share/keyrings" "$LEAK_FILE"; then
-  bad "output names a keyring file path"
+
+# §2 bans the BODY of `~/.local/share/keyrings/**`, and names exactly one exception:
+# the doctor may name and rewrite the pointer file `keyrings/default`, whose content is
+# a keyring basename. So test what §2 actually protects instead of banning the string:
+# any `*.keyring` file path is a failure, and `keyrings/<anything but default>` is too.
+STRAY_KEYRING_PATH="$(grep -oE '[^ "]*\.local/share/keyrings/[A-Za-z0-9_.-]*' "$LEAK_FILE" \
+  | grep -vE '/keyrings/default$' | sort -u)"
+if [[ -n "$STRAY_KEYRING_PATH" ]]; then
+  bad 'output names a keyrings path beyond the sanctioned "default" pointer' "$STRAY_KEYRING_PATH"
 else
-  ok "no output names ~/.local/share/keyrings"
+  ok 'the only keyrings path in any output is the sanctioned "default" pointer file'
+fi
+# A *.keyring FILE may never be named. The literal glob "*.keyring" is prose (it appears
+# in the doctor's own never_does list), so it is the one token that does not count.
+STRAY_KEYRING_FILE="$(grep -oE '[^ "]*\.keyring\b' "$LEAK_FILE" | grep -vFx '*.keyring' | sort -u)"
+if [[ -n "$STRAY_KEYRING_FILE" ]]; then
+  bad "output names a *.keyring file" "$STRAY_KEYRING_FILE"
+else
+  ok "no output names a *.keyring file"
 fi
 
 head_ "setup (only --dry-run, §4b)"
@@ -305,12 +363,20 @@ if [[ "$MODE" == "full" ]]; then
   fi
 
   head_ "RED: the doctor's connected-group checks"
-  if "$BIN" doctor --json >/dev/null 2>&1; then
-    "$BIN" doctor --json 2>/dev/null | jq -e '[.checks[] | select(.id=="dns_when_connected") | .status] | index("skip") != null' >/dev/null \
-      && ok "doctor skips dns_when_connected while the link is down" \
-      || bad "doctor does not skip dns_when_connected"
+  # `doctor` exits 11 whenever it finds a failure, which it does on this machine, so
+  # its exit code says nothing about whether it ran. Judge it by its output instead.
+  DOC_JSON="$("$BIN" doctor --json 2>/dev/null)"
+  if jq -e '.checks | length > 0' >/dev/null 2>&1 <<<"$DOC_JSON"; then
+    for check in dns_when_connected tunnel_route_ok; do
+      status="$(jq -r --arg c "$check" '[.checks[] | select(.id==$c) | .status] | first // "absent"' <<<"$DOC_JSON")"
+      if [[ "$status" == "skip" ]]; then
+        ok "doctor reports $check as skip while proton0 is down"
+      else
+        bad "doctor reports $check as '$status', expected skip (§4b RED)"
+      fi
+    done
   else
-    skip "doctor connected-group checks" "doctor is a Phase-2 stub in this build"
+    bad "doctor --json produced no checks" "${DOC_JSON:0:200}"
   fi
 fi
 

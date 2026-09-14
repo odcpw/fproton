@@ -27,13 +27,18 @@ note() { printf '    %s\n' "$*"; }
 step "cargo fmt --check"
 if cargo fmt --check; then note "no diff"; else FAILED+=("cargo fmt --check"); fi
 
+# Each of these runs ONCE: the output is captured, shown, and its real exit status
+# decides the verdict. Running them twice doubled the gate and let a flaky second
+# run disagree with the output printed from the first.
 step "cargo clippy --all-targets -- -D warnings"
-if cargo clippy --all-targets -- -D warnings 2>&1 | tail -3; then :; fi
-if ! cargo clippy --all-targets -- -D warnings >/dev/null 2>&1; then FAILED+=("cargo clippy"); fi
+CLIPPY_OUT="$(cargo clippy --all-targets -- -D warnings 2>&1)"; CLIPPY_RC=$?
+printf '%s\n' "$CLIPPY_OUT" | tail -3
+(( CLIPPY_RC == 0 )) || FAILED+=("cargo clippy")
 
 step "cargo test"
-if ! cargo test 2>&1 | grep -E "^test result|^error|panicked"; then :; fi
-if ! cargo test >/dev/null 2>&1; then FAILED+=("cargo test"); fi
+TEST_OUT="$(cargo test 2>&1)"; TEST_RC=$?
+printf '%s\n' "$TEST_OUT" | grep -E "^test result|^error|panicked"
+(( TEST_RC == 0 )) || FAILED+=("cargo test")
 
 step "core is silent (§2)"
 HITS="$(grep -rnE 'println!|eprintln!|print!|dbg!' crates/fproton-core/src || true)"
