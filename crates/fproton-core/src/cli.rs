@@ -233,6 +233,30 @@ pub fn parse_info(text: &str) -> Result<String, Error> {
     )
 }
 
+/// Split one `config list` row into `(key, value)` at the column boundary.
+///
+/// The rule line gives that boundary in **bytes**, and upstream is free to print a
+/// non-ASCII value — a localized build, a unicode `custom-dns` entry, a wide row.
+/// `str::split_at` *panics* when the index lands inside a character, which would abort
+/// the process on external data: exit 101, no JSON envelope, no §4a code, in a parser
+/// whose whole job is to tolerate upstream's formatting. So walk back to the nearest
+/// char boundary, and fall back to the first run of two or more spaces (§8 Phase 0's
+/// rule) when the column cut yields nothing usable.
+fn split_row(line: &str, width: usize) -> Option<(&str, &str)> {
+    let cut = (0..=width.min(line.len()))
+        .rev()
+        .find(|i| line.is_char_boundary(*i))
+        .unwrap_or(0);
+    let (key, value) = line.split_at(cut);
+    let (key, value) = (key.trim(), value.trim());
+    if !key.is_empty() && !value.is_empty() {
+        return Some((key, value));
+    }
+    let (key, value) = line.split_once("  ")?;
+    let (key, value) = (key.trim(), value.trim());
+    (!key.is_empty() && !value.is_empty()).then_some((key, value))
+}
+
 /// Parse the `config list` table.
 ///
 /// The column boundary is taken from the `---  ---` rule line of **this** output, not
@@ -260,14 +284,9 @@ pub fn parse_config_list(text: &str) -> Result<ProtonConfig, Error> {
         if line.trim().is_empty() {
             break; // the table ends at the blank line before the footer
         }
-        if line.len() <= width {
+        let Some((key, value)) = split_row(line, width) else {
             continue;
-        }
-        let (key, value) = line.split_at(width);
-        let (key, value) = (key.trim(), value.trim());
-        if key.is_empty() || value.is_empty() {
-            continue;
-        }
+        };
         // A value the vocabulary does not cover (`Upgrade to enable`, a custom-dns row
         // with addresses) is stored verbatim, as §5 requires.
         if config.set(key, value) {
@@ -384,6 +403,18 @@ mod tests {
         assert_eq!(c.custom_dns.as_deref(), Some("on  [1.1.1.1, 8.8.8.8]"));
         // The footer is not a row.
         assert!(!format!("{c:?}").contains("Use 'protonvpn"));
+    }
+
+    #[test]
+    fn a_multi_byte_character_across_the_column_boundary_does_not_panic() {
+        // The rule line puts the boundary at byte 10, and `ü` occupies bytes 9-10 of
+        // the ipv6 row. `split_at(10)` panics there — a parser whose job is to
+        // tolerate upstream's formatting must not abort the process on its output.
+        let table = "\nCurrent configuration\nSetting     Value\n----------  ------\n\
+                     netshield off\nipv6     \u{fc}off\n\nUse 'protonvpn config set\n";
+        let c = parse_config_list(table).expect("a non-ASCII row is data, not a panic");
+        assert_eq!(c.netshield.as_deref(), Some("off"));
+        assert_eq!(c.ipv6.as_deref(), Some("\u{fc}off"));
     }
 
     #[test]

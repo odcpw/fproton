@@ -50,12 +50,27 @@ else
 fi
 
 step "no shell strings in argv (§2)"
-SHELLISH="$(grep -rnE '\b(sh|bash)\b\s*,\s*"-c"|Command::new\("(sh|bash)"\)' crates/*/src || true)"
-if [[ -z "$SHELLISH" ]]; then
-  note "no sh -c, no bash -c, anywhere in the Rust sources"
+# The pattern must allow for the closing quote between the program and "-c": in Rust
+# source the banned argv reads ["bash", "-c", …], so `\b(sh|bash)\b\s*,` — which
+# requires the comma to follow the word directly — matched neither form, and this
+# step printed an absolute claim the grep did not support. Proven non-vacuous below
+# before it is trusted.
+SHELL_ARGV_RE='"(sh|bash)"\s*,\s*"-c"|Command::new\("(sh|bash)"\)'
+SELFTEST="$(mktemp)"
+printf 'let a = ["bash", "-c", "x"];\nlet b = ["sh", "-c", "y"];\nlet c = Command::new("sh");\n' > "$SELFTEST"
+SELFTEST_HITS="$(grep -cE "$SHELL_ARGV_RE" "$SELFTEST" || true)"
+rm -f "$SELFTEST"
+if [[ "$SELFTEST_HITS" != "3" ]]; then
+  note "self-test FAILED: the pattern caught $SELFTEST_HITS of 3 known violations"
+  FAILED+=("no shell strings (gate is vacuous)")
 else
-  echo "$SHELLISH"
-  FAILED+=("no shell strings")
+  SHELLISH="$(grep -rnE "$SHELL_ARGV_RE" crates/*/src || true)"
+  if [[ -z "$SHELLISH" ]]; then
+    note "no sh -c, no bash -c, anywhere in the Rust sources (pattern caught 3/3 in its self-test)"
+  else
+    echo "$SHELLISH"
+    FAILED+=("no shell strings")
+  fi
 fi
 
 if [[ "$MODE" != "quick" ]]; then

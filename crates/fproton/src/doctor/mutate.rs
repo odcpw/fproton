@@ -123,10 +123,52 @@ pub fn write_scopes(ctx: &Context) -> Vec<PathBuf> {
     ]
 }
 
+/// True when `path` is inside one of [`write_scopes`].
+///
+/// `Path::starts_with` compares *components* and does not resolve `..`, so
+/// `<state_dir>/../../../etc/x` used to pass this guard. A `..` in a path the doctor
+/// is about to write is never legitimate — every caller builds its path from
+/// `ctx.paths` — so it is refused outright rather than canonicalised (the target of a
+/// write may not exist yet, which `canonicalize` cannot handle).
 fn in_scope(ctx: &Context, path: &Path) -> bool {
+    if has_parent_dir(path) {
+        return false;
+    }
     write_scopes(ctx)
         .iter()
         .any(|scope| path == scope || path.starts_with(scope))
+}
+
+fn has_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
+/// The same guard, as an error, for the undo side.
+///
+/// `doctor undo` takes its targets straight out of `actions.jsonl`, so without this
+/// the chokepoint's blast-radius promise held only while applying.
+fn require_in_scope(ctx: &Context, path: &Path) -> Result<(), Error> {
+    if in_scope(ctx, path) {
+        return Ok(());
+    }
+    Err(Error::doctor_refused(format!(
+        "{} is outside the doctor's write scopes; nothing was changed",
+        path.display()
+    ))
+    .with_hint("fproton doctor capabilities --json   # write_scopes"))
+}
+
+/// Map an absolute path to the relative one used under `backups/` and `quarantine/`,
+/// refusing anything with a `..` component so the mapping cannot escape the run dir.
+fn run_relative(path: &Path) -> Result<PathBuf, Error> {
+    if has_parent_dir(path) {
+        return Err(Error::doctor_refused(format!(
+            "{} contains a `..` component; refusing to map it into the run directory",
+            path.display()
+        )));
+    }
+    Ok(path.strip_prefix("/").unwrap_or(path).to_path_buf())
 }
 
 /// The per-run artifact directory (§7): `report.json`, `actions.jsonl`, `probes/`,
@@ -198,9 +240,9 @@ impl RunDir {
     }
 
     /// Backups live at `backups/<absolute path without its leading slash>`.
-    fn backup_rel(path: &Path) -> PathBuf {
-        let rel = path.strip_prefix("/").unwrap_or(path);
-        Path::new("backups").join(rel)
+    /// A `..` component is refused rather than joined: it would escape the run dir.
+    fn backup_rel(path: &Path) -> Result<PathBuf, Error> {
+        Ok(Path::new("backups").join(run_relative(path)?))
     }
 }
 
@@ -365,7 +407,7 @@ impl<'a> Mutator<'a> {
         // Axiom 2: the backup is written and verified before anything is touched.
         let mut backup_rel: Option<String> = None;
         if let (Some(run), Some(old)) = (self.run.as_ref(), existing.as_deref()) {
-            let rel = RunDir::backup_rel(path);
+            let rel = RunDir::backup_rel(path)?;
             let dest = run.dir.join(&rel);
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {
@@ -393,17 +435,18 @@ impl<'a> Mutator<'a> {
             std::fs::create_dir_all(parent)
                 .map_err(|e| Error::failure(format!("cannot create {}: {e}", parent.display())))?;
         }
-        // Axiom 5: temp file beside the target, then rename(2).
-        let tmp = path.with_extension(format!("fproton-doctor.tmp.{}", std::process::id()));
-        std::fs::write(&tmp, bytes)
-            .map_err(|e| Error::failure(format!("cannot write {}: {e}", tmp.display())))?;
-        std::fs::rename(&tmp, path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            Error::failure(format!("cannot replace {}: {e}", path.display()))
-        })?;
 
-        let line = serde_json::json!({
-            "seq": seq, "check": check, "class": class.name(), "started_at": started_at, "ok": true,
+        // The journal entry is written and fsynced BEFORE the rename, as this module's
+        // own refusal text has always claimed ("a mutation must be recorded before it
+        // is applied"). Applying first left a window — a crash, a SIGKILL, ENOSPC —
+        // in which the file was replaced with nothing in actions.jsonl, so `undo`
+        // silently skipped it. The intent line carries `ok: false` (undo never
+        // replays it blindly); the completion line that follows the rename carries
+        // `ok: true` and is what `undo` acts on. An intent with no completion is
+        // reported as "may or may not have applied", with its backup named.
+        let mut line = serde_json::json!({
+            "seq": seq, "check": check, "class": class.name(), "started_at": started_at,
+            "ok": false, "phase": "intent",
             "action": {"kind": "write_file", "path": path.display().to_string(), "len": bytes.len()},
             "before": {"existed": existing.is_some(), "sha256": before_sha, "backup": backup_rel},
             "after": {"sha256": sha256(bytes), "len": bytes.len()},
@@ -414,6 +457,21 @@ impl<'a> Mutator<'a> {
                 serde_json::json!({"kind": "quarantine_file", "path": path.display().to_string()})
             },
         });
+        self.record(&line)?;
+
+        // Axiom 5: temp file beside the target, then rename(2).
+        let tmp = path.with_extension(format!("fproton-doctor.tmp.{}", std::process::id()));
+        std::fs::write(&tmp, bytes)
+            .map_err(|e| Error::failure(format!("cannot write {}: {e}", tmp.display())))?;
+        std::fs::rename(&tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            Error::failure(format!("cannot replace {}: {e}", path.display()))
+        })?;
+
+        if let Some(map) = line.as_object_mut() {
+            map.insert("ok".into(), serde_json::json!(true));
+            map.insert("phase".into(), serde_json::json!("done"));
+        }
         self.record(&line)?;
         Ok(Outcome::Applied)
     }
@@ -599,11 +657,13 @@ pub fn plan(kind: PlanKind, ctx: &Context, probes: &Probes) -> Result<Vec<Action
         }
 
         PlanKind::ClearPending => {
-            let text = probes
-                .state_json
-                .text
-                .clone()
-                .ok_or_else(|| Error::doctor_refused("state.json was not captured"))?;
+            // Re-read state.json HERE, not from `probes.state_json` — that copy was
+            // captured at the start of the run, and `cli_session_probe` alone spends
+            // 8 s before this point. Rebuilding the whole document from the probe copy
+            // rolled back everything written in between: a connect that finished, its
+            // history row, a recents entry, a refreshed config cache.
+            let text = std::fs::read_to_string(ctx.paths.state_file())
+                .map_err(|e| Error::doctor_refused(format!("cannot re-read state.json: {e}")))?;
             let mut file: state::StateFile = serde_json::from_str(&text).map_err(|e| {
                 Error::doctor_refused(format!(
                     "state.json does not parse, so it cannot be edited: {e}"
@@ -654,12 +714,18 @@ pub fn plan(kind: PlanKind, ctx: &Context, probes: &Probes) -> Result<Vec<Action
         PlanKind::RebuildIndex => {
             // Build into a scratch cache dir so the only write to the real snapshot
             // is the one the chokepoint makes, with a backup and a hash.
-            let scratch = std::env::temp_dir().join(format!(
-                "fproton-doctor-index.{}.{}",
+            // Under the fproton-owned cache dir, created with `create_dir` (which
+            // fails on an existing directory) rather than in the world-writable,
+            // fully predictable `/tmp`: whatever ends up at this path becomes
+            // fproton's server index, so a pre-existing directory is never reused.
+            let scratch = ctx.paths.cache_dir.join(format!(
+                "doctor-index-scratch.{}.{}",
                 std::process::id(),
                 probes.now_unix
             ));
-            std::fs::create_dir_all(&scratch)
+            let _ = std::fs::create_dir_all(&ctx.paths.cache_dir);
+            let _ = std::fs::remove_dir_all(&scratch);
+            std::fs::create_dir(&scratch)
                 .map_err(|e| Error::failure(format!("cannot create {}: {e}", scratch.display())))?;
             let mut scratch_ctx = ctx.clone();
             scratch_ctx.paths.cache_dir = scratch.clone();
@@ -814,6 +880,10 @@ struct ActionLine {
     check: String,
     #[serde(default)]
     ok: bool,
+    /// `"intent"` (written before the mutation) or `"done"` (written after it).
+    /// Absent on the variants that still record once, after the fact.
+    #[serde(default)]
+    phase: String,
     inverse: serde_json::Value,
 }
 
@@ -877,9 +947,35 @@ pub fn undo(ctx: &Context, dir: &Path) -> Result<Vec<UndoStep>, Error> {
     }
     lines.reverse();
 
+    // Every seq that reached its completion line. An `intent` without one is a run
+    // that stopped between the journal entry and the write.
+    let completed: std::collections::HashSet<u64> =
+        lines.iter().filter(|l| l.ok).map(|l| l.seq).collect();
+
     let mut steps = Vec::new();
     for line in lines {
         if !line.ok {
+            if line.phase == "intent" && !completed.contains(&line.seq) {
+                let backup = line
+                    .inverse
+                    .get("backup")
+                    .and_then(|b| b.as_str())
+                    .map(|b| format!("backup available at {}", dir.join(b).display()));
+                steps.push(UndoStep {
+                    seq: line.seq,
+                    check: line.check,
+                    inverse: line
+                        .inverse
+                        .get("kind")
+                        .and_then(|k| k.as_str())
+                        .unwrap_or("none")
+                        .to_string(),
+                    outcome: "unknown — the run stopped between the journal entry and \
+                              the write; nothing was undone"
+                        .to_string(),
+                    note: backup,
+                });
+            }
             continue;
         }
         let kind = line
@@ -893,9 +989,9 @@ pub fn undo(ctx: &Context, dir: &Path) -> Result<Vec<UndoStep>, Error> {
             .and_then(|n| n.as_str())
             .map(str::to_string);
         let outcome = match kind {
-            "restore_file" => restore_file(dir, &line.inverse)?,
-            "quarantine_file" => quarantine(dir, &line.inverse)?,
-            "remove_symlink" => remove_symlink(&line.inverse)?,
+            "restore_file" => restore_file(ctx, dir, &line.inverse)?,
+            "quarantine_file" => quarantine(ctx, dir, &line.inverse)?,
+            "remove_symlink" => remove_symlink(ctx, &line.inverse)?,
             "run_argv" => {
                 let argv: Vec<String> = line
                     .inverse
@@ -943,11 +1039,14 @@ pub fn undo(ctx: &Context, dir: &Path) -> Result<Vec<UndoStep>, Error> {
     Ok(steps)
 }
 
-fn restore_file(dir: &Path, inverse: &serde_json::Value) -> Result<String, Error> {
+fn restore_file(ctx: &Context, dir: &Path, inverse: &serde_json::Value) -> Result<String, Error> {
     let target = inverse
         .get("path")
         .and_then(|p| p.as_str())
         .ok_or_else(|| Error::doctor_refused("an undo record has no path"))?;
+    // Undo is bounded by the same write scopes as apply: the targets come out of
+    // actions.jsonl, which is a file on disk like any other.
+    require_in_scope(ctx, Path::new(target))?;
     let rel = inverse
         .get("backup")
         .and_then(|p| p.as_str())
@@ -984,16 +1083,17 @@ fn restore_file(dir: &Path, inverse: &serde_json::Value) -> Result<String, Error
 }
 
 /// A file the run created: moved aside, never deleted (§2, Axiom 3).
-fn quarantine(dir: &Path, inverse: &serde_json::Value) -> Result<String, Error> {
+fn quarantine(ctx: &Context, dir: &Path, inverse: &serde_json::Value) -> Result<String, Error> {
     let target = inverse
         .get("path")
         .and_then(|p| p.as_str())
         .ok_or_else(|| Error::doctor_refused("an undo record has no path"))?;
     let path = Path::new(target);
+    require_in_scope(ctx, path)?;
     if !path.exists() {
         return Ok("already absent".to_string());
     }
-    let rel = path.strip_prefix("/").unwrap_or(path);
+    let rel = run_relative(path)?;
     let dest = dir.join("quarantine").join(rel);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
@@ -1004,12 +1104,13 @@ fn quarantine(dir: &Path, inverse: &serde_json::Value) -> Result<String, Error> 
     Ok(format!("moved to {}", dest.display()))
 }
 
-fn remove_symlink(inverse: &serde_json::Value) -> Result<String, Error> {
+fn remove_symlink(ctx: &Context, inverse: &serde_json::Value) -> Result<String, Error> {
     let link = inverse
         .get("link")
         .and_then(|p| p.as_str())
         .ok_or_else(|| Error::doctor_refused("an undo record has no link"))?;
     let path = Path::new(link);
+    require_in_scope(ctx, path)?;
     match std::fs::symlink_metadata(path) {
         Err(_) => Ok("already absent".to_string()),
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -1057,6 +1158,86 @@ mod tests {
             .metadata()
             .map(|m| m.len() == 4)
             .unwrap_or(false));
+
+        // `Path::starts_with` compares components and does not resolve `..`, so this
+        // escaped the guard while looking like an in-scope path.
+        let escape = ctx.paths.state_dir.join("../../../etc/fproton-escape");
+        let err = m
+            .mutate(
+                "x",
+                Class::A,
+                Action::WriteFile {
+                    path: escape.clone(),
+                    bytes: b"nope".to_vec(),
+                },
+            )
+            .expect_err("a `..` component must be refused");
+        assert_eq!(err.exit_code(), 13, "{err}");
+        assert!(!escape.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn undo_refuses_a_target_outside_the_write_scopes() {
+        // Undo takes its targets from actions.jsonl, which is a file on disk like any
+        // other. It must be bounded by the same scopes as apply.
+        let (ctx, dir) = test_ctx("undo-scope");
+        let run = RunDir::create(&ctx).expect("run dir");
+        let run_dir = run.dir.clone();
+        drop(run);
+        let forged = serde_json::json!({
+            "seq": 1, "check": "forged", "ok": true, "phase": "done",
+            "inverse": {"kind": "restore_file", "path": "/etc/passwd", "backup": "backups/etc/passwd"},
+        });
+        std::fs::write(run_dir.join("actions.jsonl"), format!("{forged}\n")).unwrap();
+        let err = undo(&ctx, &run_dir).expect_err("must refuse");
+        assert_eq!(err.exit_code(), 13, "{err}");
+        assert!(err.to_string().contains("write scopes"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_journal_entry_is_written_before_the_mutation() {
+        // A crash between the rename and the journal append left a file replaced with
+        // nothing in actions.jsonl, so `undo` silently skipped it — the opposite of
+        // what this module's own refusal text claims.
+        let (ctx, dir) = test_ctx("journal-order");
+        let target = ctx.paths.state_dir.join("ordered.json");
+        std::fs::write(&target, b"before").unwrap();
+        let run = RunDir::create(&ctx).expect("run dir");
+        let run_dir = run.dir.clone();
+        let mut m = Mutator::new(&ctx, Some(run), false);
+        m.mutate(
+            "x",
+            Class::A,
+            Action::WriteFile {
+                path: target.clone(),
+                bytes: b"after".to_vec(),
+            },
+        )
+        .expect("apply");
+        drop(m);
+
+        let journal = std::fs::read_to_string(run_dir.join("actions.jsonl")).unwrap();
+        let lines: Vec<&str> = journal.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 2, "intent then completion:\n{journal}");
+        assert!(lines[0].contains(r#""phase":"intent""#), "{}", lines[0]);
+        assert!(lines[0].contains(r#""ok":false"#), "{}", lines[0]);
+        assert!(lines[1].contains(r#""phase":"done""#), "{}", lines[1]);
+        assert!(lines[1].contains(r#""ok":true"#), "{}", lines[1]);
+
+        // With only the intent line — exactly what a crash mid-write leaves — undo
+        // touches nothing and says so, naming the backup.
+        std::fs::write(run_dir.join("actions.jsonl"), format!("{}\n", lines[0])).unwrap();
+        let steps = undo(&ctx, &run_dir).expect("undo reports rather than refusing");
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].outcome.starts_with("unknown"), "{:?}", steps[0]);
+        assert!(steps[0].note.as_deref().unwrap_or("").contains("backups/"));
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"after",
+            "nothing restored"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1108,7 +1289,7 @@ mod tests {
             },
         )
         .expect("write");
-        let backup = run_dir.join(RunDir::backup_rel(&target));
+        let backup = run_dir.join(RunDir::backup_rel(&target).unwrap());
         std::fs::write(&backup, b"tampered").expect("tamper");
         let err = undo(&ctx, &run_dir).expect_err("must refuse");
         assert_eq!(err.exit_code(), 13, "{err}");
@@ -1287,14 +1468,14 @@ mod tests {
         let snapshot = ctx.paths.index_file();
         assert!(snapshot.exists());
         assert_eq!(&std::fs::read(&snapshot).unwrap()[..4], b"FPIX");
-        // No scratch directory is left behind.
-        let leftovers: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+        // No scratch directory is left behind, and none of it was ever in /tmp.
+        let leftovers: Vec<_> = std::fs::read_dir(&ctx.paths.cache_dir)
             .unwrap()
             .flatten()
             .filter(|e| {
                 e.file_name()
                     .to_string_lossy()
-                    .starts_with(&format!("fproton-doctor-index.{}", std::process::id()))
+                    .starts_with("doctor-index-scratch.")
             })
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");

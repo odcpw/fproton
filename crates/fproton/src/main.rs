@@ -449,7 +449,10 @@ extern "C" fn note_signal(sig: libc::c_int) {
 fn install_cancel_on_signal(cancel: &CancelToken) {
     unsafe {
         libc::signal(libc::SIGINT, note_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, note_signal as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            note_signal as *const () as libc::sighandler_t,
+        );
     }
     let cancel = cancel.clone();
     std::thread::spawn(move || {
@@ -557,6 +560,9 @@ fn run(cli: Cli, out: Out) -> Result<i32, Error> {
                 return Ok(0);
             }
             let c = engine::connect(&ctx, &target, &cancel)?;
+            if wait {
+                wait_for_link(&ctx, &out, &cancel)?;
+            }
             out.emit(
                 ok(serde_json::json!({"action": "connect", "target": target.to_string(), "connected": c})),
                 |o| {
@@ -1008,6 +1014,38 @@ fn validated_country(cc: &str) -> Result<String, Error> {
             Error::usage(format!("'{cc}' is not a two-letter country code"))
                 .with_hint("fproton countries"),
         )
+    }
+}
+
+/// `connect --wait`: block until `proton0` is actually carrying a profile.
+///
+/// The engine returning `Ok` only means the Proton CLI exited 0; NetworkManager may
+/// still be bringing the interface up. This is the only producer of §4a's exit 8, and
+/// the flag was previously parsed, documented and then ignored — `--help` described
+/// behaviour that did not exist, which §2 forbids.
+fn wait_for_link(ctx: &Context, out: &Out, cancel: &CancelToken) -> Result<(), Error> {
+    use fproton_core::nm;
+    let deadline = std::time::Instant::now() + ctx.timeouts.connect();
+    let mut said = false;
+    loop {
+        if nm::link_state(ctx).map(|l| l.up).unwrap_or(false) {
+            return Ok(());
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::Interrupted);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::timeout(format!(
+                "the Proton CLI returned but proton0 did not come up within {}s",
+                ctx.timeouts.connect().as_secs()
+            ))
+            .with_hint("fproton status --json"));
+        }
+        if !said {
+            said = true;
+            out.verbose_note("--wait: polling for proton0");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }
 
