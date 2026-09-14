@@ -47,23 +47,26 @@ Connect targets (one positional): fastest | CC | CC#N | city:NAME | p2p | secure
     disable_help_subcommand = true
 )]
 struct Cli {
+    // The six global flags carry a display_order above any command's own arguments so
+    // that `fproton servers --help` reads as "what this command does" and then "what
+    // every command does", instead of interleaving the two.
     /// Machine-readable JSON on stdout (errors too, with the same exit code)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, display_order = 100)]
     json: bool,
-    /// Clamp every external deadline to N seconds
-    #[arg(long, global = true, value_name = "SECONDS")]
+    /// Clamp every external deadline to N seconds (no effect on commands that spawn nothing)
+    #[arg(long, global = true, value_name = "SECONDS", display_order = 101)]
     timeout: Option<u64>,
     /// Diagnostics on stderr; repeat for more
-    #[arg(short = 'v', long, global = true, action = clap::ArgAction::Count)]
+    #[arg(short = 'v', long, global = true, action = clap::ArgAction::Count, display_order = 102)]
     verbose: u8,
     /// Never emit colour (also honoured: NO_COLOR, CI, a non-TTY stdout)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, display_order = 103)]
     no_color: bool,
-    /// Confirm an irreversible action
-    #[arg(long, global = true)]
+    /// Confirm an irreversible action: disconnect --force, wg swap, setup, doctor --fix
+    #[arg(long, global = true, display_order = 104)]
     yes: bool,
-    /// Print what would happen and change nothing
-    #[arg(long, global = true)]
+    /// Print what would happen and change nothing (same four commands as --yes)
+    #[arg(long, global = true, display_order = 105)]
     dry_run: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -276,12 +279,162 @@ impl From<SortArg> for Sort {
     }
 }
 
+/// Turn clap's own rendering into one line: keep `error:` and `tip:`, drop the ANSI,
+/// the `Usage:` block and the "For more information" footer (the hint replaces it).
+fn clap_message(e: &clap::Error) -> String {
+    let rendered = e.render().to_string();
+    let mut plain = String::with_capacity(rendered.len());
+    let mut chars = rendered.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            plain.push(c);
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for line in plain.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("Usage:") || line.starts_with("For more information")
+        {
+            continue;
+        }
+        match parts.last_mut() {
+            // clap wraps a list (`the following required arguments were not
+            // provided:` then one indented item per line) — fold it back up.
+            Some(last) if last.ends_with(':') => {
+                last.push(' ');
+                last.push_str(line);
+            }
+            _ => parts.push(line.trim_start_matches("error: ").to_string()),
+        }
+    }
+    if parts.is_empty() {
+        "invalid arguments".to_string()
+    } else {
+        parts.join("; ")
+    }
+}
+
+/// The command path the user was reaching for, e.g. `["config", "set"]`, so that both
+/// the message and the hint can name it. Empty when no command was recognised.
+fn clap_path(argv: &[std::ffi::OsString]) -> Vec<&'static str> {
+    const SUBS: [&str; 23] = [
+        "status",
+        "connect",
+        "disconnect",
+        "reconnect",
+        "servers",
+        "countries",
+        "cities",
+        "index",
+        "config",
+        "settings",
+        "port",
+        "history",
+        "recents",
+        "account",
+        "signin",
+        "signout",
+        "wg",
+        "doctor",
+        "setup",
+        "tui",
+        "capabilities",
+        "robot-docs",
+        "version",
+    ];
+    // The commands that themselves take a subcommand, and what those are.
+    const NESTED: [(&str, &[&str]); 4] = [
+        ("config", &["list", "get", "set"]),
+        ("settings", &["get", "set"]),
+        ("wg", &["up", "swap", "list"]),
+        ("doctor", &["undo", "capabilities"]),
+    ];
+    let mut path: Vec<&'static str> = Vec::new();
+    for arg in argv.iter().skip(1) {
+        let Some(arg) = arg.to_str() else { continue };
+        if arg.starts_with('-') {
+            continue;
+        }
+        match path.as_slice() {
+            [] => {
+                let name = match arg {
+                    "ls" => "servers",
+                    "docs" => "robot-docs",
+                    other => match SUBS.iter().find(|s| **s == other) {
+                        Some(s) => s,
+                        None => return path,
+                    },
+                };
+                path.push(name);
+            }
+            [top] => {
+                let Some((_, subs)) = NESTED.iter().find(|(n, _)| n == top) else {
+                    return path;
+                };
+                match subs.iter().find(|s| **s == arg) {
+                    Some(s) => path.push(s),
+                    None => return path,
+                }
+            }
+            _ => return path,
+        }
+    }
+    path
+}
+
+/// Always a command that actually runs (§2: hints are runnable).
+fn clap_hint(path: &[&str]) -> String {
+    if path.is_empty() {
+        "fproton --help".to_string()
+    } else {
+        format!("fproton {} --help", path.join(" "))
+    }
+}
+
+/// Parse, or turn clap's failure into the §2 error envelope so that a piping agent
+/// gets one JSON object for *every* failure, a bad flag value included.
+fn parse_or_report() -> Cli {
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    match Cli::try_parse_from(&argv) {
+        Ok(cli) => cli,
+        Err(e) => {
+            use clap::error::ErrorKind;
+            // `--help` and `--version` are successes clap reports as errors.
+            if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+                e.exit();
+            }
+            // The policy has to be read off the raw argv: there is no parsed Cli yet.
+            let flag = |name: &str| argv.iter().any(|a| a == name);
+            let out = Out::new(flag("--json"), flag("--no-color"), 0);
+            let path = clap_path(&argv);
+            // A bare `fproton config` makes clap render the whole help page; say what
+            // is actually missing instead of pasting a screenful into `error`.
+            let message = if e.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
+                match path.as_slice() {
+                    [top] => format!("`fproton {top}` needs a subcommand"),
+                    _ => "a subcommand is required".to_string(),
+                }
+            } else {
+                clap_message(&e)
+            };
+            let err = Error::usage(message).with_hint(clap_hint(&path));
+            std::process::exit(out.report(&err));
+        }
+    }
+}
+
 fn main() {
     // Behave like a Unix tool when stdout is a closed pipe (`fproton servers | head`).
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let cli = Cli::parse();
+    let cli = parse_or_report();
     let out = Out::new(cli.json, cli.no_color, cli.verbose);
     match run(cli, out) {
         Ok(code) => std::process::exit(code),

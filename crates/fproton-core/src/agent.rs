@@ -14,9 +14,10 @@ use crate::status::WARNING_IDS;
 use crate::{CONTRACT_VERSION, NAME, SCHEMA_VERSION, VERSION};
 
 /// Which phase of DESIGN.md §8 this binary was built at. Later phases update it.
-pub const BUILD_STAGE: &str = "phase-1b-core";
+pub const BUILD_STAGE: &str = "v0.1-integrated";
 /// Said in `capabilities`, `robot-docs` and nowhere else: what this build really does.
-pub const BUILD_NOTE: &str = "Phase-1b core: status, servers/countries/cities/index, settings, history/recents, port and setup are implemented and verified on this machine. connect/reconnect/disconnect/config/account/signout drive the official Proton CLI, which is wedged on this machine (a broken Secret Service default collection): only their deadline and error paths have been verified, never a successful connection. `tui` and `doctor` are Phase-2 stubs. `wg` is an unverified experiment behind FPROTON_EXPERIMENTAL_WG=1.";
+/// The three tiers are DESIGN.md §4b; nothing here may claim a RED row works.
+pub const BUILD_NOTE: &str = "Every command is implemented. What differs is how much of each has been verified on the build machine, whose Proton CLI is wedged by a broken Secret Service default collection. VERIFIED END TO END: status, servers, countries, cities, index, settings, history, recents, capabilities, robot-docs, version, tui, doctor, `setup --dry-run`, `disconnect --force` (a no-op while both NetworkManager profiles are inactive), port's no-tunnel error, signin's argument validation. ONLY THE ERROR AND DEADLINE PATHS VERIFIED: connect, disconnect, reconnect, config list/get/set, account, signout — each drives the official Proton CLI, so on this machine they exit 5 when it is killed at its deadline. NEVER VERIFIED, DO NOT ASSUME THEY WORK: a successful connect or reconnect, a successful port-forwarding request, every `wg` subcommand (an experiment behind FPROTON_EXPERIMENTAL_WG=1), and the doctor's dns_when_connected and tunnel_route_ok checks, which skip while proton0 is down.";
 
 /// One row of the `commands` array in `capabilities`.
 #[derive(Serialize)]
@@ -128,14 +129,16 @@ Proton VPN for Omarchy. One binary: CLI, doctor, TUI, and the backend of the
 `oliver.protonvpn` bar widget.
 
 BUILD STAGE
-  This binary is the Phase-1b core. What is verified end to end on this machine:
-  status, servers, countries, cities, index, settings, history, recents, capabilities,
-  robot-docs, version, setup --dry-run, disconnect --force (a no-op while nothing is
-  up) and port's no-tunnel error.
+  Every command is implemented; they differ in how much has been verified.
+  Verified end to end on this machine: status, servers, countries, cities, index,
+  settings, history, recents, capabilities, robot-docs, version, tui, doctor,
+  setup --dry-run, disconnect --force (a no-op while nothing is up) and port's
+  no-tunnel error.
   Verified only on their timeout/error path, because the official Proton CLI hangs on
   this machine: connect, reconnect, disconnect, config list|get|set, account, signout.
-  Never verified, and claimed nowhere: a successful connect, a granted forwarded port,
-  and every `wg` subcommand. `tui` and `doctor` are Phase-2 stubs that exit 1.
+  Never verified, and claimed nowhere: a successful connect or reconnect, a granted
+  forwarded port, every `wg` subcommand, and the doctor's dns_when_connected and
+  tunnel_route_ok checks, which skip while proton0 is down.
 
 FIRST CALL
   fproton status --json      Everything about the current state, in one object.
