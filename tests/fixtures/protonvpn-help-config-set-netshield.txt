@@ -1,0 +1,24 @@
+Usage: protonvpn config set netshield [OPTIONS] {off|malware-only|malware-ads-
+                                      trackers}
+
+  Configure NetShield ad-blocking and malware protection.
+
+Options:
+  -h, --help  Show this message and exit.
+
+  Values:
+    off                    NetShield disabled
+    malware-only           Block malware domains
+    malware-ads-trackers   Block malware, ads, and trackers (recommended)
+  
+  Examples:
+    protonvpn config set netshield off
+    protonvpn config set netshield malware-only
+    protonvpn config set netshield malware-ads-trackers
+  
+  Current Setting:
+    Run 'protonvpn config list' to see current value.
+  
+  How It Works:
+    NetShield blocks malicious and advertising domains at the DNS level,
+    preventing malware downloads and removing ads before they load.

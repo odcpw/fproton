@@ -1,0 +1,21 @@
+Usage: protonvpn config set kill-switch [OPTIONS] {off|standard}
+
+  Configure Kill Switch to block internet if VPN connection drops.
+
+Options:
+  -h, --help  Show this message and exit.
+
+  Values:
+    off        Disable Kill Switch (internet always accessible)
+    standard   Block internet only while VPN is active
+  
+  Examples:
+    protonvpn config set kill-switch off
+    protonvpn config set kill-switch standard
+  
+  Current Setting:
+    Run 'protonvpn config list' to see current value.
+  
+  Behavior:
+    - standard: Blocks internet if VPN drops during active connection
+                Restores internet when you disconnect intentionally

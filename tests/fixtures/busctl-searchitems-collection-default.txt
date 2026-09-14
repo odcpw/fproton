@@ -1,0 +1,1 @@
+ao 2 "/org/freedesktop/secrets/collection/Default/1" "/org/freedesktop/secrets/collection/Default/2"

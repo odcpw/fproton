@@ -1,0 +1,35 @@
+Usage: protonvpn connect [OPTIONS] [SERVER_NAME]
+
+  Connect to Proton VPN server.
+
+  Arguments:
+
+  SERVER_NAME Connect to specific server by ID (e.g., IT#23)
+
+Options:
+  --country TEXT     Connect to fastest server in specified country
+                     Country code (US, GB, DE) or full name ("United States")
+  --city TEXT        Connect to fastest server in specified city
+                     City name (use quotes for multi-word: "New York")
+  --p2p              Connect to fastest P2P-optimized server
+  -sc, --securecore  Connect to fastest Secure Core server
+  --tor              Connect to fastest Tor server
+  --random           Connect to random available server
+  -h, --help         Show this message and exit.
+
+  Examples:
+    # Quick connection
+    protonvpn connect                     # Fastest server globally
+  
+    # Location selection
+    protonvpn connect --country US        # Fastest in United States
+    protonvpn connect --city "New York"   # Fastest in New York
+    protonvpn connect IT#23               # Specific server
+  
+    # Feature-based selection
+    protonvpn connect --p2p               # Fastest P2P server
+    protonvpn connect --country IT --p2p  # Fastest P2P in Italy
+  
+    # Extra secure connections
+    protonvpn connect --securecore        # Secure Core routing
+    protonvpn connect --tor               # Tor over VPN

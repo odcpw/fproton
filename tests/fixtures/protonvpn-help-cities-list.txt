@@ -1,0 +1,10 @@
+Usage: protonvpn cities list [OPTIONS] COUNTRY
+
+  Shows a list of cities where servers are available in a specific country.
+
+  Arguments:
+
+  COUNTRY    Country code (US, GB, DE) or full name ("United States")
+
+Options:
+  -h, --help  Show this message and exit.

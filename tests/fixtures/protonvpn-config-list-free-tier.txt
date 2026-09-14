@@ -1,0 +1,20 @@
+# derived from proton-vpn-cli 1.0.3 source, not captured from a run
+# same render, free tier (user_on_free_tier=True): the five features with available_on_free_tier=False show 'Upgrade to enable', and the footer is the four-line upgrade block
+# sources: commands/settings.py:285-331 + core/controller.py:69,257
+
+Current configuration
+Setting                  Value
+-----------------------  -----------------
+netshield                Upgrade to enable
+kill-switch              standard
+port-forwarding          Upgrade to enable
+custom-dns               Upgrade to enable
+vpn-accelerator          Upgrade to enable
+moderate-nat             Upgrade to enable
+ipv6                     off
+anonymous-crash-reports  on
+
+To upgrade to VPN Plus visit: https://account.protonvpn.com/pricing
+After upgrading online:
+    Sign out and sign in again to activate your new plan:
+    protonvpn signout && protonvpn signin

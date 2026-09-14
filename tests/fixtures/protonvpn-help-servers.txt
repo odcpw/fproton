@@ -1,0 +1,7 @@
+Usage: protonvpn servers [OPTIONS]
+
+  View available servers. Prints the link to the full server list on
+  protonvpn.com.
+
+Options:
+  -h, --help  Show this message and exit.

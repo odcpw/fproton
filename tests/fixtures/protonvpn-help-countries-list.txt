@@ -1,0 +1,6 @@
+Usage: protonvpn countries list [OPTIONS]
+
+  List all countries where Proton VPN servers are available.
+
+Options:
+  -h, --help  Show this message and exit.

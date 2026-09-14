@@ -11,3 +11,30 @@
 - 2026-09-14 · orchestrator · Cut from v0.1: WorldMap, cities drill-down in the panel, notifications wired on (setting default off), `port --keepalive`, `watch`, `status --fast`, `change` (now `reconnect --next`), doctor scoring apparatus, `ipv6_leak_guard`, `gtk_app_conflict`, CI workflow + CHANGELOG (at first push), doctor screen in the TUI, TUI mouse. Doctor keeps a `mutate(Action)` chokepoint + `actions.jsonl` + `undo` because the fixers are few and the inverse recording is cheap; the doctor never deletes anything.
 - 2026-09-14 · orchestrator · Index = postcard snapshot rebuilt when serverlist.json's mtime changes (Python's C parser reads the 24 MB file in 77 ms; a snapshot is needed for the 50 ms status budget). fsqlite is out (nightly-only).
 - 2026-09-14 · orchestrator · DESIGN.md v3 after a second review round (consistency, implementer dry-run, lean/honest/safe). Filled contract gaps: `pending`/`last_error`/`account`/`config`/`HistoryEntry` shapes; frozen core API now returns `Error` everywhere and adds `state::pending/clear_pending`, `settings::validate`, `engine::reconnect`, `Target: FromStr`, `target_for_server`, `AliasProbe` fields; `connect` loses `--engine`; server/link resolution by NM UUID from connection_persistence.json; versioned postcard header, `status` never rebuilds; e2e gets `--fast`/`--full` with per-case state dirs and `--timeout 3`; `setup --menu` is a textual insert (never parse-and-rewrite the user's JSONC); doctor fixtures only for the nine parsing detectors, run artifacts bounded (`--save`, prune to 10), keyring fixer bytes + undo caveat (SetAlias back to a dangling path cannot work → clear alias), `killswitch_orphan` needs four preconditions; `omarchy-launch-or-focus-tui` is NOT argv-safe (constant literals only; doctor app-id `fprotondoctor`); PanelKeyCatcher only dispatches (Panel owns the state machine; TextField handles Esc); `recents` gets a data source; TUI exit code = the error's own code. Phases: 0 fixtures ∥ 1a API freeze → 1b core (docs starts after 1a) → 2 tui/plugin/doctor → 3 → 4. Added `sha2`, `jiff` to fproton-core.
+- 2026-09-14 · fixtures · All 23 `protonvpn … --help` fixtures captured live (165-220 ms each, exit 0, no hang) under `timeout 8`; the top-level one is `protonvpn-help-top.txt` because `--help` alone has no subcommand name. `config set --help` confirms exactly the eight keys DESIGN §1.3 lists.
+- 2026-09-14 · fixtures · `protonvpn-info.txt` and `protonvpn-config-list.txt` are DERIVED from the installed Python source, never run; each carries the `# derived from proton-vpn-cli 1.0.3 source, not captured from a run` header plus source file:line lines, so consumers must skip leading `#` lines. `config list`'s footer line 2 is `Use 'protonvpn config set <setting> --help' …` — `ctx.help_option_names[0]` is `--help`, not `-h` (`_cli_constants.py:31-32`, order `[HELP_OPTION, HELP_OPTION_ABBREVIATED]`).
+- 2026-09-14 · fixtures · Added `protonvpn-config-list-free-tier.txt` (second derived render): it is the only fixture covering the `Upgrade to enable` branch (`available_on_free_tier=False` on five of eight features, `controller.py:69,257`) and the four-line free-tier footer, and its Value column is 17 chars against 22 in the paid file, so a parser using fixed column offsets fails on one of the two. The renderer is committed as `tests/fixtures/derive-config-list.py` (python-tabulate 0.10.0, the same module the CLI imports).
+- 2026-09-14 · fixtures · `nmcli -t connection show <proton uuid>` is now stored verbatim, including the two lines the first capture dropped: `wireguard.private-key:<hidden>` (nmcli's own redaction) and `wireguard.private-key-flags:0` (the proof the key is in the root-only keyfile). No secret is exposed.
+- 2026-09-14 · fixtures · The Secret Service phantom-path error uses typographic quotes: `Object does not exist at path “/org/freedesktop/secrets/collection/Default_5fkeyring”` (U+201C/U+201D). The `secret_service_default_alias` detector must match the prefix `Object does not exist at path`, never an ASCII-quoted path.
+- 2026-09-14 · fixtures · `busctl --user list` is stored filtered (`grep -E '^(NAME|org\.freedesktop\.secrets|org\.kde\.secretservicecompat)'`) rather than verbatim: the full listing is 106 unrelated user-session services. The filter is part of the command recorded in `tests/fixtures/README.md`. It also records that `org.kde.secretservicecompat` is present as *activatable* — a second Secret Service provider that could claim the name.
+- 2026-09-14 · fixtures · `serverlist-small.json` extended from 35 to 38 logicals by appending the real `IS-DE#1`, `US-CA#1022` and `US-CO#21-TOR` entries from the live 24 MB list (purely additive; 167 inserted lines, 0 deleted), so the fixture now covers every server-name shape DESIGN §1.3 names and `Features` values 1, 2 and 28.
+- 2026-09-14 · fixtures · Transcript of the offline `config list` render (paid tier), produced by `python3 tests/fixtures/derive-config-list.py`:
+  ```
+  $ python3 tests/fixtures/derive-config-list.py
+
+  Current configuration
+  Setting                  Value
+  -----------------------  ----------------------
+  netshield                malware-ads-trackers
+  kill-switch              standard
+  port-forwarding          off
+  custom-dns               on  [1.1.1.1, 8.8.8.8]
+  vpn-accelerator          on
+  moderate-nat             off
+  ipv6                     off
+  anonymous-crash-reports  on
+
+  Use 'protonvpn config set <setting> <value>' to change settings.
+  Use 'protonvpn config set <setting> --help' for available values.
+  ```
+  Values are plausible, not this account's real settings (Proton stores none on disk). `custom-dns` deliberately carries a two-space run inside its own value, so the table parser must split once on the rule-derived boundary, not on every `\s{2,}`.

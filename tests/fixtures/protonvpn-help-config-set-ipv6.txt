@@ -1,0 +1,20 @@
+Usage: protonvpn config set ipv6 [OPTIONS] {off|on}
+
+  Enable or disable IPv6 support.
+
+Options:
+  -h, --help  Show this message and exit.
+
+  Values:
+    off   Disable IPv6 (default)
+    on    Enable IPv6
+  
+  Examples:
+    protonvpn config set ipv6 on
+    protonvpn config set ipv6 off
+  
+  Current Setting:
+    Run 'protonvpn config list' to see current value.
+  
+  How It Works:
+    When enabled, IPv6 traffic will be routed through the VPN tunnel.

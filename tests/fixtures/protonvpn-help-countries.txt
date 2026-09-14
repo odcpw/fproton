@@ -1,0 +1,21 @@
+Usage: protonvpn countries [OPTIONS] COMMAND [ARGS]...
+
+  Discover all countries where Proton VPN servers are available.
+
+Options:
+  -h, --help  Show this message and exit.
+
+Commands:
+  list  List all countries where Proton VPN servers are available.
+
+  Output:
+    Displays country names with their two-letter codes and server counts.
+  
+  Examples:
+    protonvpn countries list
+  
+  Connect to a country:
+    protonvpn connect --country <CODE>
+  
+  Explore cities in a country:
+    protonvpn cities list <COUNTRY>

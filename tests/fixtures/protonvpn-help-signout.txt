@@ -1,0 +1,12 @@
+Usage: protonvpn signout [OPTIONS]
+
+  Sign out from Proton VPN and clear local credentials.
+
+Options:
+  -h, --help  Show this message and exit.
+
+  Examples:
+    protonvpn signout
+  
+  To sign in again:
+    protonvpn signin

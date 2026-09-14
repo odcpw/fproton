@@ -1,0 +1,16 @@
+Usage: protonvpn disconnect [OPTIONS]
+
+  Disconnect from current VPN server.
+
+  This command will:
+    - Terminate active VPN connection
+    - Restore original network configuration
+
+Options:
+  -h, --help  Show this message and exit.
+
+  Examples:
+    protonvpn disconnect
+  
+  Check connection status:
+    protonvpn status

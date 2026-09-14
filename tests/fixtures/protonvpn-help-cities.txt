@@ -1,0 +1,24 @@
+Usage: protonvpn cities [OPTIONS] COMMAND [ARGS]...
+
+  Discover cities where servers are available in a specific country.
+
+Options:
+  -h, --help  Show this message and exit.
+
+Commands:
+  list  Shows a list of cities where servers are available in a specific
+        country.
+
+  Country Format:
+    Two-letter code: US, GB, DE
+    Full name: "United States", "Germany" (use quotes for multi-word)
+  
+  Examples:
+    protonvpn cities list US               # Cities in US (direct argument)
+    protonvpn cities list "United States"  # Full country name
+  
+  Connect to a city:
+    protonvpn connect --city <CITY>
+  
+  To see available countries:
+    protonvpn countries list

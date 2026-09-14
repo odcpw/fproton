@@ -1,0 +1,28 @@
+Usage: protonvpn config set anonymous-crash-reports [OPTIONS] {off|on}
+
+  Enable or disable anonymous crash reports.
+
+Options:
+  -h, --help  Show this message and exit.
+
+  Values:
+    off   Disable crash reporting
+    on    Enable anonymous crash reporting
+  
+  Examples:
+    protonvpn config set anonymous-crash-reports on
+    protonvpn config set anonymous-crash-reports off
+  
+  Current Setting:
+    Run 'protonvpn config list' to see current value.
+  
+  How It Works:
+    When enabled, the CLI sends anonymous crash reports to help us:
+    - Fix bugs and improve stability
+    - Detect firewall interference
+    - Avoid VPN blocks
+  
+  Privacy:
+    - Reports are completely anonymous
+    - No personal information is collected
+    - Helps improve the CLI for everyone

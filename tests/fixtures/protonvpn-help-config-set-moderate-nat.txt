@@ -1,0 +1,24 @@
+Usage: protonvpn config set moderate-nat [OPTIONS] {off|on}
+
+  Enable or disable Moderate NAT for improved gaming and P2P performance.
+
+Options:
+  -h, --help  Show this message and exit.
+
+  Values:
+    off   Disable Moderate NAT (Strict NAT)
+    on    Enable Moderate NAT
+  
+  Examples:
+    protonvpn config set moderate-nat on
+    protonvpn config set moderate-nat off
+  
+  Current Setting:
+    Run 'protonvpn config list' to see current value.
+  
+  How It Works:
+    NAT (Network Address Translation) type affects your ability to connect
+    to other players in online games and peers in P2P networks.
+
+    Strict NAT (off): Maximum security, may limit connections in games/P2P
+    Moderate NAT (on): Better connectivity for gaming and P2P, still secure

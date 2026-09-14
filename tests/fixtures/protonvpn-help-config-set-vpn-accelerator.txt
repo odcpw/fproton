@@ -1,0 +1,26 @@
+Usage: protonvpn config set vpn-accelerator [OPTIONS] {off|on}
+
+  Enable or disable VPN Accelerator for improved connection speeds.
+
+Options:
+  -h, --help  Show this message and exit.
+
+  Values:
+    off   Disable VPN Accelerator
+    on    Enable VPN Accelerator (recommended)
+  
+  Examples:
+    protonvpn config set vpn-accelerator on
+    protonvpn config set vpn-accelerator off
+  
+  Current Setting:
+    Run 'protonvpn config list' to see current value.
+  
+  How It Works:
+    VPN Accelerator uses advanced technologies to increase VPN speeds
+    by up to 400% without compromising security. It optimizes the
+    connection between your device and Proton VPN servers.
+  
+  Recommendation:
+    Keep enabled for best performance. Only disable if experiencing
+    connection issues with specific networks.

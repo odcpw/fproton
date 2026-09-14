@@ -1,0 +1,6 @@
+Usage: protonvpn config list [OPTIONS]
+
+  Show current configuration for all settings.
+
+Options:
+  -h, --help  Show this message and exit.

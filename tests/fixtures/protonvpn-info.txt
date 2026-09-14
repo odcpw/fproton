@@ -1,0 +1,5 @@
+# derived from proton-vpn-cli 1.0.3 source, not captured from a run
+# source: /usr/lib/python3.14/site-packages/proton/vpn/cli/commands/account.py:107
+#   click.echo(f"Account: '{controller.account_name}'")  -- one line, no plan field
+# the account name below is a placeholder; replace with a real capture once the keyring is repaired
+Account: 'user@example.com'

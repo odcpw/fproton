@@ -1,0 +1,19 @@
+# derived from proton-vpn-cli 1.0.3 source, not captured from a run
+# rendered offline with python-tabulate 0.10.0 (the same module the CLI uses); paid tier (MaxTier 2), no 'Upgrade to enable' rows
+# sources: commands/settings.py:285-331, commands/feature_setting_definitions.py:475-484 (row order), :67-190 (value vocabulary)
+# values below are plausible, not this account's real settings (no user settings exist on disk; only 'protonvpn config list' knows them)
+
+Current configuration
+Setting                  Value
+-----------------------  ----------------------
+netshield                malware-ads-trackers
+kill-switch              standard
+port-forwarding          off
+custom-dns               on  [1.1.1.1, 8.8.8.8]
+vpn-accelerator          on
+moderate-nat             off
+ipv6                     off
+anonymous-crash-reports  on
+
+Use 'protonvpn config set <setting> <value>' to change settings.
+Use 'protonvpn config set <setting> --help' for available values.

@@ -105,6 +105,8 @@ ipv6.dhcp-hostname:
 ipv6.dhcp-hostname-flags:0x0
 ipv6.auto-route-ext-gw:-1
 ipv6.token:
+wireguard.private-key:<hidden>
+wireguard.private-key-flags:0
 wireguard.listen-port:0
 wireguard.fwmark:0xea13b2c
 wireguard.peer-routes:yes

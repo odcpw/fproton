@@ -1,0 +1,29 @@
+Usage: protonvpn config [OPTIONS] COMMAND [ARGS]...
+
+  Configure Proton VPN settings.
+
+Options:
+  -h, --help  Show this message and exit.
+
+Commands:
+  list  Show current configuration for all settings.
+  set   Change a specific setting.
+
+  Examples:
+    protonvpn config list
+    protonvpn config set netshield malware-ads-trackers
+    protonvpn config set kill-switch standard
+    protonvpn config set ipv6 on
+  
+  Available Settings:
+    netshield              Ad-blocking and malware protection
+    kill-switch            Block internet if VPN drops
+    port-forwarding        Enable port forwarding for P2P
+    custom-dns             Use custom DNS servers
+    vpn-accelerator        Performance optimization
+    moderate-nat           NAT type for gaming/P2P
+    ipv6                   IPv6 support
+    anonymous-crash-reports Anonymous crash reporting
+  
+  For setting-specific help:
+    protonvpn config set <setting> --help

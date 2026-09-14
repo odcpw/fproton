@@ -1,0 +1,6 @@
+Usage: protonvpn info [OPTIONS]
+
+  Display your Proton VPN account information.
+
+Options:
+  -h, --help  Show this message and exit.

@@ -1,0 +1,24 @@
+Usage: protonvpn config set custom-dns [OPTIONS] {off|on}
+
+  Configure custom DNS servers.
+
+Options:
+  --dns TEXT  Comma-separated DNS server IPs (IPv4 or IPv6)
+  -h, --help  Show this message and exit.
+
+  Values:
+    off   Disable custom DNS (use Proton's DNS)
+    on    Enable custom DNS with specified servers
+  
+  Examples:
+    # Enable with custom DNS
+    protonvpn config set custom-dns on --dns 1.1.1.1,8.8.8.8
+  
+    # Enable with IPv6
+    protonvpn config set custom-dns on --dns 2606:4700:4700::1111
+  
+    # Disable custom DNS
+    protonvpn config set custom-dns off
+  
+  Current Setting:
+    Run 'protonvpn config list' to see current DNS configuration.

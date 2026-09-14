@@ -1,0 +1,15 @@
+Usage: protonvpn status [OPTIONS]
+
+  Show current VPN connection status.
+  
+  Displays:
+    - Connection status (Connected/Disconnected)
+    - Server name and location (if connected)
+    - Server load percentage (if connected)
+    - Connection protocol (if connected)
+
+Options:
+  -h, --help  Show this message and exit.
+
+  Examples:
+    protonvpn status

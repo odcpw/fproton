@@ -1,0 +1,23 @@
+Usage: protonvpn config set port-forwarding [OPTIONS] {off|on}
+
+  Enable or disable port forwarding for P2P applications.
+
+Options:
+  -h, --help  Show this message and exit.
+
+  Values:
+    off   Disable port forwarding
+    on    Enable port forwarding
+  
+  How It Works:
+    When enabled, the VPN client requests a forwarded port during
+    connection to P2P-capable servers. The port assignment requires
+    an external script to maintain the lease and retrieve the port
+    number. Without the script, the assigned port expires.
+  
+  Setup Guide:
+    https://protonvpn.com/support/port-forwarding-manual-setup#linux
+  
+  Examples:
+    protonvpn config set port-forwarding on
+    protonvpn config set port-forwarding off

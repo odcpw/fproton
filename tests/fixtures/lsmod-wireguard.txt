@@ -1,0 +1,4 @@
+wireguard             122880  0
+libcurve25519          65536  1 wireguard
+ip6_udp_tunnel         16384  1 wireguard
+udp_tunnel             36864  1 wireguard

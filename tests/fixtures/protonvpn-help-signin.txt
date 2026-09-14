@@ -1,0 +1,13 @@
+Usage: protonvpn signin [OPTIONS] USERNAME
+
+  Sign in to Proton VPN with your credentials.
+
+  Arguments:
+
+  USERNAME Proton account username
+
+Options:
+  -h, --help  Show this message and exit.
+
+  Examples:
+    protonvpn signin user@proton.me
