@@ -19,7 +19,6 @@ toml = "1.1"
 libc = "0.2"
 ftui = { version = "0.7", features = ["crossterm"] }
 ftui-extras = { version = "0.7", features = ["canvas"] }
-fsqlite = "0.4"
 unicode-width = "0.2"
 
 [profile.release]
