@@ -7,7 +7,7 @@
 //!
 //! argv only: there is no shell anywhere in this module.
 
-use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 
 use std::path::PathBuf;
@@ -23,6 +23,11 @@ use crate::error::Error;
 const POLL: Duration = Duration::from_millis(25);
 /// Grace between SIGTERM and SIGKILL (§2).
 const GRACE: Duration = Duration::from_secs(2);
+/// How long we keep draining the pipes *after* the child has been reaped.
+/// A descendant that left the process group (`setsid`, a daemonising helper) still
+/// holds the inherited write end, so the pipes may never reach EOF. Reading is
+/// therefore bounded: the deadline never depends on a reader finishing.
+const DRAIN_GRACE: Duration = Duration::from_millis(200);
 
 /// A cooperative cancel flag shared with a running action (the TUI's `StopSignal`
 /// bridges to this). Cheap to clone; safe to poll from any thread.
@@ -99,6 +104,107 @@ fn signal_group(pgid: i32, sig: i32) {
     unsafe { libc::kill(-pgid, sig) };
 }
 
+fn set_nonblocking(fd: libc::c_int) {
+    if fd < 0 {
+        return;
+    }
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+}
+
+/// Both child pipes, drained without ever blocking.
+///
+/// This replaces the two `read_to_end` threads the first cut used. Those threads had
+/// to be joined before the call could return, which handed the deadline to whatever
+/// held the write end — including a descendant that had escaped the process group and
+/// so survived the kill. `poll(2)` on non-blocking fds keeps reading inside the same
+/// wait loop that owns the deadline, so nothing outside it can extend the call.
+struct Pipes {
+    out_fd: libc::c_int,
+    err_fd: libc::c_int,
+    out_eof: bool,
+    err_eof: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl Pipes {
+    fn new(out_fd: libc::c_int, err_fd: libc::c_int) -> Self {
+        set_nonblocking(out_fd);
+        set_nonblocking(err_fd);
+        Pipes {
+            out_fd,
+            err_fd,
+            out_eof: out_fd < 0,
+            err_eof: err_fd < 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn done(&self) -> bool {
+        self.out_eof && self.err_eof
+    }
+
+    /// Read whatever is ready, waiting at most `wait`. Doubles as the wait loop's sleep.
+    fn pump(&mut self, wait: Duration) {
+        if self.done() {
+            std::thread::sleep(wait);
+            return;
+        }
+        let mut fds = [
+            libc::pollfd {
+                fd: if self.out_eof { -1 } else { self.out_fd },
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: if self.err_eof { -1 } else { self.err_fd },
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let ms = wait.as_millis().min(i32::MAX as u128) as libc::c_int;
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, ms) };
+        if n <= 0 {
+            // 0 = the wait expired, -1 = EINTR or a bad fd; either way, try again later.
+            return;
+        }
+        if fds[0].revents != 0 {
+            self.out_eof = drain_fd(self.out_fd, &mut self.stdout);
+        }
+        if fds[1].revents != 0 {
+            self.err_eof = drain_fd(self.err_fd, &mut self.stderr);
+        }
+    }
+}
+
+/// Read everything currently buffered on `fd`. Returns true when the pipe is at EOF
+/// (or is unreadable, which we treat the same way — there is nothing more to get).
+fn drain_fd(fd: libc::c_int, buf: &mut Vec<u8>) -> bool {
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        let n = unsafe {
+            libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) as isize
+        };
+        if n > 0 {
+            buf.extend_from_slice(&chunk[..n as usize]);
+            continue;
+        }
+        if n == 0 {
+            return true; // EOF: every write end is closed.
+        }
+        return match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EAGAIN) | Some(libc::EINTR) => false, // nothing ready right now
+            _ => true,                                       // broken/invalid: stop reading
+        };
+    }
+}
+
 /// Run `argv` with a deadline, in its own process group, with piped stdio.
 ///
 /// * returns `Ok(Output { timed_out: true })` when the deadline killed the child;
@@ -136,24 +242,15 @@ pub fn run_with_deadline(
     // The child must never wait on stdin: close it immediately.
     drop(child.stdin.take());
 
-    // Drain both pipes on their own threads so a chatty child cannot fill a pipe
-    // buffer and deadlock against our wait loop.
-    let mut out_pipe = child.stdout.take();
-    let mut err_pipe = child.stderr.take();
-    let out_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = out_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let err_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = err_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
+    // Drain both pipes from inside the wait loop, non-blocking, so a chatty child
+    // cannot fill a pipe buffer and deadlock against us — and so that nothing which
+    // outlives the child can hold the call open past its deadline.
+    let out_pipe = child.stdout.take();
+    let err_pipe = child.stderr.take();
+    let mut pipes = Pipes::new(
+        out_pipe.as_ref().map(|p| p.as_raw_fd()).unwrap_or(-1),
+        err_pipe.as_ref().map(|p| p.as_raw_fd()).unwrap_or(-1),
+    );
 
     let mut timed_out = false;
     let mut cancelled = false;
@@ -166,7 +263,7 @@ pub fn run_with_deadline(
         if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
             cancelled = true;
         } else if started.elapsed() < timeout {
-            std::thread::sleep(POLL);
+            pipes.pump(POLL);
             continue;
         } else {
             timed_out = true;
@@ -182,7 +279,7 @@ pub fn run_with_deadline(
                     let _ = child.wait();
                     break;
                 }
-                Ok(None) => std::thread::sleep(POLL),
+                Ok(None) => pipes.pump(POLL),
                 Err(e) => return Err(Error::failure(format!("waiting for {program}: {e}"))),
             }
         }
@@ -191,8 +288,17 @@ pub fn run_with_deadline(
             .map_err(|e| Error::failure(format!("waiting for {program}: {e}")))?;
     };
 
-    let stdout = out_thread.join().unwrap_or_default();
-    let stderr = err_thread.join().unwrap_or_default();
+    // The child is reaped. Collect whatever is still in flight, but only for
+    // DRAIN_GRACE: if a descendant escaped the process group it still holds the write
+    // end and EOF will never come. A well-behaved child is already at EOF here, so
+    // this costs nothing on the normal path.
+    let drain_deadline = Instant::now() + DRAIN_GRACE;
+    while !pipes.done() && Instant::now() < drain_deadline {
+        pipes.pump(Duration::from_millis(10));
+    }
+    let Pipes { stdout, stderr, .. } = pipes;
+    drop(out_pipe);
+    drop(err_pipe);
     if cancelled {
         return Err(Error::Interrupted);
     }
@@ -262,6 +368,24 @@ mod tests {
             "process group {} still has members",
             out.pid
         );
+    }
+
+    #[test]
+    fn a_descendant_outside_the_process_group_cannot_defeat_the_deadline() {
+        // `setsid` forks `sleep` into a new session and exits at once. The grandchild
+        // is outside our process group (so the kill never reaches it) and still holds
+        // the inherited stdout/stderr write ends, so neither pipe will ever see EOF.
+        // Before the fix the call blocked here forever, joining the reader threads
+        // long after the deadline had passed — DESIGN §2's first invariant, defeated.
+        let t = Instant::now();
+        let out = run_with_deadline(&["setsid", "sleep", "20"], secs(1.0), None).unwrap();
+        let elapsed = t.elapsed();
+        assert!(
+            elapsed < secs(2.0),
+            "reading must never outlive the deadline; returned after {elapsed:?}"
+        );
+        // setsid itself exits immediately and successfully.
+        assert_eq!(out.code, Some(0));
     }
 
     #[test]

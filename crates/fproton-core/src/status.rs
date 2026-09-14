@@ -816,8 +816,20 @@ pub fn status(ctx: &Context) -> Result<Status, Error> {
     }
 
     if state_changed {
+        // Never write back the snapshot taken *before* the probes. In the tens of
+        // milliseconds they take, another process — or, in the TUI, the action thread
+        // running beside the 1 s poll — may have written `pending`, a history row, a
+        // recent or a `last_error`, and a whole-file save would silently revert it.
+        // Commit only the five fields `status` owns, through `update`, which re-reads
+        // under the advisory lock immediately before it writes.
         // A cache write must never be the reason `status` fails.
-        let _ = state::save(ctx, &state);
+        let _ = state::update(ctx, |s| {
+            s.signed_in = state.signed_in;
+            s.signed_in_at = state.signed_in_at.clone();
+            s.link_uuid = state.link_uuid.clone();
+            s.link_up_since = state.link_up_since.clone();
+            s.traffic = state.traffic.clone();
+        });
     }
     Ok(s)
 }

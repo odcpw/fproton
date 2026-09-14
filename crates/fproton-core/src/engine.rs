@@ -477,6 +477,12 @@ pub fn reconnect(ctx: &Context, next: bool, cancel: &CancelToken) -> Result<Conn
     };
 
     let target = if next { next_server(ctx, &last)? } else { last };
+    // Resolve BEFORE `begin`, exactly as `connect` does. `begin` writes the `pending`
+    // record and only `finish` clears it, so an early return between the two leaves a
+    // record nothing will ever clear: `status` reports `connecting` for the whole 90 s
+    // deadline, then fabricates a `last_error` and a `stale_pending` warning that
+    // needs `doctor --fix`. There must be no `?` between `begin` and `finish`.
+    resolve(ctx, &target)?;
     // `reconnect` records itself as a reconnect; `connect` would record a connect.
     let deadline = ctx.timeouts.connect();
     let started = begin(
@@ -485,7 +491,6 @@ pub fn reconnect(ctx: &Context, next: bool, cancel: &CancelToken) -> Result<Conn
         Some(&target),
         deadline.as_secs(),
     );
-    resolve(ctx, &target)?;
     let args = crate::cli::connect_args(&target);
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     let outcome = crate::cli::run(ctx, &argv, deadline, cancel).map(|_| ());
@@ -594,6 +599,52 @@ pub fn disconnect(ctx: &Context, force: bool, cancel: &CancelToken) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reconnect_that_cannot_resolve_leaves_no_pending_record() {
+        // `begin` writes `pending` and only `finish` clears it, so resolving after
+        // `begin` left a record nothing would ever clear: `status` then reported
+        // `connecting` for 90 s and invented a `last_error` at the end of it.
+        //
+        // The index is pointed at the small fixture so `resolve` has a real answer.
+        // Without one it degrades to `Ok(())` and this test would spawn a real
+        // `protonvpn connect` — which §1.2 says must never happen unbounded.
+        let dir = std::env::temp_dir().join(format!(
+            "fproton-engine-test-{}-{}",
+            std::process::id(),
+            crate::state::unix_now()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut ctx = Context::for_test(&dir).expect("test context");
+        let proton = dir.join("proton");
+        std::fs::create_dir_all(&proton).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/serverlist-small.json"
+            ),
+            proton.join("serverlist.json"),
+        )
+        .unwrap();
+        ctx.paths.proton_cache_dir = proton;
+        crate::index::rebuild(&ctx, &CancelToken::new()).expect("index from the fixture");
+
+        let target = Target::Server("CH#99999".into());
+        assert!(
+            resolve(&ctx, &target).is_err(),
+            "precondition: the index must be loaded and must NOT know CH#99999 — \
+             otherwise this test spawns the real Proton CLI"
+        );
+        crate::state::push_recent(&ctx, &target).unwrap();
+        let err = reconnect(&ctx, false, &CancelToken::new()).unwrap_err();
+        assert_eq!(err.exit_code(), 6, "an unknown server is not_found");
+        assert!(
+            crate::state::pending(&ctx).unwrap().is_none(),
+            "a refused reconnect must not leave a pending action behind"
+        );
+        assert!(crate::state::history(&ctx, 10).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn real_server_names_parse() {

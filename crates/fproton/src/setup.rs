@@ -292,10 +292,32 @@ pub fn template_entries() -> Vec<(String, String)> {
     entries
 }
 
+/// True for a line that carries no JSON value: blank, or a `//` / `/* … */` comment.
+///
+/// §4 chose a textual merge precisely because this file is "user-owned … full of
+/// comments", so neither the closing brace nor the comma may be chosen by looking at
+/// the last non-blank line: in a commented file that line is very often a comment.
+fn is_comment_or_blank(line: &str) -> bool {
+    let t = line.trim_start();
+    t.is_empty() || t.starts_with("//") || t.starts_with("/*") || t.starts_with('*')
+}
+
+/// Every line of `text` paired with the byte offset it starts at.
+fn lines_with_offsets(text: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        out.push((offset, line.trim_end_matches(['\n', '\r'])));
+        offset += line.len();
+    }
+    out
+}
+
 /// Insert the missing entries immediately before the file's final `}` (§4).
 ///
 /// Returns the new text, or `None` when every id is already present. Existing lines
-/// are left byte for byte alone.
+/// are left byte for byte alone, with one exception the dry-run diff shows: the entry
+/// that was previously last gains the trailing comma the new entries need after it.
 pub fn merge_menu(existing: &str, entries: &[(String, String)]) -> Option<String> {
     let have = ids_in_menu(existing);
     let missing: Vec<&(String, String)> = entries
@@ -305,19 +327,35 @@ pub fn merge_menu(existing: &str, entries: &[(String, String)]) -> Option<String
     if missing.is_empty() {
         return None;
     }
-    let close = existing.rfind('}')?;
+    // The document's closing brace — never one that only appears inside a trailing
+    // comment (`// } keep the personal entries above this line`).
+    let close = lines_with_offsets(existing)
+        .iter()
+        .rev()
+        .find(|(_, l)| !is_comment_or_blank(l) && l.contains('}'))
+        .and_then(|(offset, l)| l.rfind('}').map(|i| offset + i))
+        .or_else(|| existing.rfind('}'))?;
     let (head, tail) = existing.split_at(close);
 
-    // The line before the insertion point must end in `,` or `{` for the file to stay
-    // valid JSONC; the owner's last entry usually has no trailing comma.
+    // The last line that actually *ends a JSON value* must end in `,` (or be the
+    // opening `{`) for the file to stay valid JSONC; the owner's last entry usually
+    // has no trailing comma. Appending it after `head.trim_end()` would have put the
+    // comma inside whatever comment happened to come last, breaking the file.
     let mut head = head.to_string();
-    let trimmed_end = head.trim_end();
-    let needs_comma = !trimmed_end.ends_with(',') && !trimmed_end.ends_with('{');
-    if needs_comma {
-        let cut = head.len() - (head.len() - trimmed_end.len());
-        head.truncate(cut);
-        head.push(',');
-        head.push('\n');
+    let comma_at = {
+        let lines = lines_with_offsets(&head);
+        lines
+            .iter()
+            .rev()
+            .find(|(_, l)| !is_comment_or_blank(l))
+            .and_then(|(offset, l)| {
+                let content = l.trim_end();
+                (!content.ends_with(',') && !content.ends_with('{'))
+                    .then_some(offset + content.len())
+            })
+    };
+    if let Some(at) = comma_at {
+        head.insert(at, ',');
     }
     if !head.ends_with('\n') {
         head.push('\n');
@@ -336,7 +374,13 @@ pub fn merge_menu(existing: &str, entries: &[(String, String)]) -> Option<String
     Some(format!("{head}{tail}"))
 }
 
-/// A minimal unified diff, enough to show what `--dry-run` would insert.
+/// A minimal line diff — every line that goes away, then every line that appears.
+///
+/// Not a unified diff: there is no context and no hunk header. It only has to be
+/// *complete*, and the `+`-only version was not: the merge appends a comma to the
+/// entry that was previously last, and showing that rewritten line as a pure addition
+/// made it read as a duplicate of the owner's own entry. This is the only preview of
+/// the only user-owned file fproton writes, so it must show removals too.
 fn diff(path: &Path, before: &str, after: &str) -> String {
     let mut out = format!(
         "--- {}\n+++ {} (fproton setup --menu)\n",
@@ -344,8 +388,17 @@ fn diff(path: &Path, before: &str, after: &str) -> String {
         path.display()
     );
     let before_lines: Vec<&str> = before.lines().collect();
-    for line in after.lines() {
-        if before_lines.contains(&line) {
+    let after_lines: Vec<&str> = after.lines().collect();
+    for line in &before_lines {
+        if after_lines.contains(line) {
+            continue;
+        }
+        out.push('-');
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in &after_lines {
+        if before_lines.contains(line) {
             continue;
         }
         out.push('+');
@@ -584,16 +637,54 @@ mod tests {
         }
     }
 
+    /// The last entry before the insertion point is a `//` comment — the shape §4
+    /// warns about, and the one the first cut got wrong: the comma was appended after
+    /// `head.trim_end()`, which put it *inside* the comment and left the entry above
+    /// with no comma at all, so the merged file no longer parsed.
+    const COMMENTED_TAIL_MENU: &str = r#"{
+  // the owner's own entries
+  "torrents.stop": {"icon":"","label":"Stop","action":"fbittorrent down"}
+  // keep the personal entries above this line
+}
+"#;
+
+    /// Strip whole-line `//` comments the way a JSONC reader may, then parse.
+    fn parse_jsonc(text: &str) -> serde_json::Value {
+        let stripped: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        serde_json::from_str(&stripped)
+            .unwrap_or_else(|e| panic!("merged menu is not JSON: {e}\n{stripped}"))
+    }
+
     #[test]
-    fn a_merge_keeps_every_existing_line_byte_for_byte() {
+    fn a_merge_keeps_every_existing_line_except_the_trailing_comma() {
         let merged = merge_menu(USER_MENU, &template_entries()).expect("something to insert");
+        // Exactly one line may change, and only by gaining a `,`: the entry that was
+        // last. Every other line survives byte for byte. (README says the same.)
+        let mut rewritten = Vec::new();
         for line in USER_MENU.lines().filter(|l| !l.trim().is_empty()) {
             if line.trim() == "}" {
                 continue;
             }
-            let kept = merged.contains(line) || merged.contains(&format!("{line},"));
-            assert!(kept, "the merge dropped or rewrote: {line}");
+            // The newline matters: without it `…tui"}` matches inside `…tui"},`
+            // and a rewritten line reads as an untouched one.
+            if merged.contains(&format!("{line}\n")) {
+                continue;
+            }
+            assert!(
+                merged.contains(&format!("{line},\n")),
+                "the merge dropped or rewrote: {line}"
+            );
+            rewritten.push(line);
         }
+        assert_eq!(
+            rewritten,
+            [r#"  "torrents.open": {"icon":"","label":"Open","action":"fbittorrent tui"}"#],
+            "only the previously-last entry may gain a comma"
+        );
         assert!(
             merged.contains("// the owner's own entries"),
             "comments survive"
@@ -601,6 +692,50 @@ mod tests {
         assert!(merged.contains(MENU_MARKER));
         assert!(merged.contains("\"protonvpn.doctor\""));
         assert!(merged.trim_end().ends_with('}'));
+    }
+
+    #[test]
+    fn a_comment_as_the_last_line_does_not_swallow_the_comma() {
+        let merged =
+            merge_menu(COMMENTED_TAIL_MENU, &template_entries()).expect("something to insert");
+        assert!(
+            merged.contains("  // keep the personal entries above this line\n"),
+            "the trailing comment must be untouched:\n{merged}"
+        );
+        assert!(
+            merged.contains(r#""action":"fbittorrent down"},"#),
+            "the comma belongs on the last real entry:\n{merged}"
+        );
+        let v = parse_jsonc(&merged);
+        assert_eq!(v["torrents.stop"]["action"], "fbittorrent down");
+        assert_eq!(v["protonvpn.connect"]["action"], "fproton connect");
+    }
+
+    #[test]
+    fn a_closing_brace_inside_a_trailing_comment_is_not_the_insertion_point() {
+        let menu = "{\n  \"torrents\": {\"label\":\"T\"}\n}\n// } that brace is prose\n";
+        let merged = merge_menu(menu, &template_entries()).expect("something to insert");
+        assert!(
+            merged.trim_end().ends_with("// } that brace is prose"),
+            "the comment must stay after the document:\n{merged}"
+        );
+        let v = parse_jsonc(&merged);
+        assert_eq!(v["protonvpn.connect"]["action"], "fproton connect");
+    }
+
+    #[test]
+    fn the_dry_run_diff_shows_the_rewritten_line_as_a_removal_and_an_addition() {
+        let merged = merge_menu(USER_MENU, &template_entries()).unwrap();
+        let text = diff(Path::new("/tmp/omarchy-menu.jsonc"), USER_MENU, &merged);
+        assert!(
+            text.contains("\n-  \"torrents.open\""),
+            "the line that gains a comma must show as a removal:\n{text}"
+        );
+        assert!(
+            text.contains("\n+  \"torrents.open\""),
+            "…and as the addition that replaces it:\n{text}"
+        );
+        assert!(text.contains("\n+  // fproton"));
     }
 
     #[test]

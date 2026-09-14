@@ -6,8 +6,15 @@
 //! document and a crash never truncates the old one. A state file that cannot be
 //! parsed is treated as empty rather than fatal: state is a cache, not a source of
 //! truth, and `fproton status` must keep answering.
+//!
+//! Every read-modify-write goes through [`update`], which holds an advisory
+//! `flock(2)` on `state.json.lock` across the read and the write. Atomic replacement
+//! alone is not enough: two writers can each read the same snapshot, change different
+//! fields and rename over one another, so the second silently reverts the first's
+//! `pending` record or history row.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::os::fd::AsRawFd;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -160,9 +167,54 @@ pub fn save(ctx: &Context, state: &StateFile) -> Result<(), Error> {
     })
 }
 
-/// Read, change, write back. The whole file is rewritten, so a caller never has to
-/// think about partial updates.
+/// How long [`update`] waits for the advisory lock before going ahead without it.
+/// State is a cache and §2 forbids blocking for ever on one, so the lock is
+/// best-effort: it removes the race, it never introduces a hang.
+const LOCK_WAIT: Duration = Duration::from_millis(2000);
+
+/// An advisory `flock(2)` held across a read-modify-write of `state.json`.
+struct StateLock(Option<std::fs::File>);
+
+impl StateLock {
+    fn acquire(ctx: &Context) -> Self {
+        let _ = ctx.paths.ensure_dirs();
+        let path = ctx.paths.state_file().with_extension("json.lock");
+        let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+        else {
+            return StateLock(None);
+        };
+        let fd = file.as_raw_fd();
+        let deadline = Instant::now() + LOCK_WAIT;
+        loop {
+            // Non-blocking, so the wait is ours to bound rather than the kernel's.
+            if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return StateLock(Some(file));
+            }
+            if Instant::now() >= deadline {
+                return StateLock(None);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.as_ref() {
+            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+/// Read, change, write back, under the advisory lock. The whole file is rewritten,
+/// so a caller never has to think about partial updates — and because the read
+/// happens inside the lock, a caller also never reverts a concurrent writer.
 pub fn update<T>(ctx: &Context, f: impl FnOnce(&mut StateFile) -> T) -> Result<T, Error> {
+    let _lock = StateLock::acquire(ctx);
     let mut state = load(ctx)?;
     let value = f(&mut state);
     save(ctx, &state)?;
@@ -361,6 +413,41 @@ mod tests {
         ctx.paths.ensure_dirs().unwrap();
         std::fs::write(ctx.paths.state_file(), "{not json").unwrap();
         assert!(load(&ctx).unwrap().history.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_updates_do_not_revert_each_other() {
+        // Two writers reading the same snapshot and renaming over one another used to
+        // lose rows: whoever wrote second reverted the first. `update` now holds an
+        // advisory flock across the read and the write, so every row survives.
+        let (ctx, dir) = test_ctx("concurrent");
+        let row = |i: usize| HistoryEntry {
+            at: crate::now_rfc3339(),
+            action: HistoryAction::Connect,
+            target: Some(format!("CH#{i}")),
+            server: None,
+            country: Some("CH".into()),
+            engine: "cli".into(),
+            result: HistoryResult::Ok,
+            code_name: None,
+            duration_sec: 1,
+        };
+        std::thread::scope(|scope| {
+            for thread in 0..4 {
+                let ctx = &ctx;
+                scope.spawn(move || {
+                    for i in 0..20 {
+                        push_history(ctx, row(thread * 100 + i)).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            load(&ctx).unwrap().history.len(),
+            80,
+            "a concurrent writer reverted rows another had already committed"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

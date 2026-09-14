@@ -429,6 +429,48 @@ fn parse_or_report() -> Cli {
     }
 }
 
+/// The signal a handler saw, or 0. An `AtomicI32` store is async-signal-safe; nothing
+/// else in the handler is allowed to be.
+static SIGNALLED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn note_signal(sig: libc::c_int) {
+    SIGNALLED.store(sig, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Ctrl+C must cancel the action, not abandon it.
+///
+/// With the default disposition, SIGINT killed fproton outright: the `protonvpn` child
+/// runs in its own process group, so the terminal's SIGINT never reached it, the tunnel
+/// kept coming up unattended, and `pending` was left behind with no history row. The
+/// handler only sets a flag; a watcher thread turns that into a `CancelToken::cancel`,
+/// which `engine::connect` already polls every 25 ms — so the child group is torn down,
+/// `finish()` records a `cancelled` row, `pending` is cleared, and §4a's exit 130 comes
+/// from fproton rather than from the signal.
+fn install_cancel_on_signal(cancel: &CancelToken) {
+    unsafe {
+        libc::signal(libc::SIGINT, note_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, note_signal as *const () as libc::sighandler_t);
+    }
+    let cancel = cancel.clone();
+    std::thread::spawn(move || {
+        let sig = loop {
+            let sig = SIGNALLED.load(std::sync::atomic::Ordering::SeqCst);
+            if sig != 0 {
+                break sig;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        cancel.cancel();
+        // Never become unkillable: a command that polls no cancel token (`status`), or
+        // an action that will not unwind, still dies on the default disposition.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    });
+}
+
 fn main() {
     // Behave like a Unix tool when stdout is a closed pipe (`fproton servers | head`).
     unsafe {
@@ -477,6 +519,7 @@ fn require_yes(yes: bool, what: &str, argv_preview: &[&str]) -> Result<(), Error
 fn run(cli: Cli, out: Out) -> Result<i32, Error> {
     let ctx = Context::load()?.with_flags(out.json(), cli.verbose, cli.timeout);
     let cancel = CancelToken::new();
+    install_cancel_on_signal(&cancel);
     let dry_run = cli.dry_run;
     let yes = cli.yes;
     out.verbose_note(format!(
@@ -804,6 +847,18 @@ fn run(cli: Cli, out: Out) -> Result<i32, Error> {
                     |o| o.line(format!("would run: protonvpn signin {user}")),
                 );
                 return Ok(0);
+            }
+            // §2 grants `signin` the only deadline-free spawn on the grounds that it is
+            // "interactive, only from a terminal". Enforce that precondition: with no
+            // terminal the child's password prompt lands in the stdout that is implied
+            // `--json`, `--timeout` is ignored, and the call hangs until something
+            // outside fproton kills it.
+            if !output::stdout_is_tty() {
+                return Err(
+                    Error::usage("signin is interactive and needs a terminal").with_hint(
+                        "omarchy-launch-floating-terminal-with-presentation fproton signin",
+                    ),
+                );
             }
             cli::signin(&ctx, &user)?;
             out.emit(
