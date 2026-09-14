@@ -65,7 +65,7 @@ pub fn run(
     require_program()?;
     let stored = state::load(ctx)?;
     if let Some(left) = state::cli_backoff_remaining(&stored) {
-        return Err(state::cli_backoff_error(left));
+        return Err(remember(ctx, state::cli_backoff_error(left)));
     }
 
     let mut argv = vec![PROGRAM];
@@ -74,12 +74,15 @@ pub fn run(
 
     if out.timed_out {
         let _ = state::note_cli_hang(ctx);
-        return Err(Error::upstream(format!(
-            "{PROGRAM} {} was killed at its {}s deadline",
-            args.join(" "),
-            deadline.as_secs()
-        ))
-        .with_hint("fproton doctor --only cli"));
+        return Err(remember(
+            ctx,
+            Error::upstream(format!(
+                "{PROGRAM} {} was killed at its {}s deadline",
+                args.join(" "),
+                deadline.as_secs()
+            ))
+            .with_hint("fproton doctor --only cli"),
+        ));
     }
     if !out.success() {
         let text = format!("{}\n{}", out.stdout_string(), out.stderr_string());
@@ -96,18 +99,28 @@ pub fn run(
         } else {
             detail
         };
-        return Err(Error::upstream(format!(
-            "{PROGRAM} {} exited {}: {detail}",
-            args.join(" "),
-            out.code
-                .map(|c| c.to_string())
-                .unwrap_or("on a signal".into())
-        ))
-        .with_hint("fproton doctor --only cli"));
+        return Err(remember(
+            ctx,
+            Error::upstream(format!(
+                "{PROGRAM} {} exited {}: {detail}",
+                args.join(" "),
+                out.code
+                    .map(|c| c.to_string())
+                    .unwrap_or("on a signal".into())
+            ))
+            .with_hint("fproton doctor --only cli"),
+        ));
     }
     // The CLI answered: the breaker is cleared and `status.cli.last_ok_at` moves.
     let _ = state::note_cli_ok(ctx);
     Ok(out)
+}
+
+/// Record a CLI failure as `status.last_error` (§5) and hand the error straight back.
+/// The next action clears it; a cache write never changes the error the caller sees.
+fn remember(ctx: &Context, e: Error) -> Error {
+    let _ = state::set_last_error(ctx, &e, None);
+    e
 }
 
 /// Upstream's wording when there is no session (exit 9 rather than 5).
