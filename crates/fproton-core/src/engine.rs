@@ -217,6 +217,173 @@ pub struct Connected {
     pub already_connected: bool,
 }
 
+// ---------------------------------------------------------------- bookkeeping
+
+/// Resolve and tier-check a target against the index, so an impossible connect costs
+/// nothing and says why (§4: unknown → 6, several matches → 7, above the tier → 6).
+///
+/// When there is no usable index the target is passed through unchecked: refusing a
+/// connect because fproton could not read Proton's cache would be worse than letting
+/// the CLI answer for itself.
+fn resolve(ctx: &Context, target: &Target) -> Result<(), Error> {
+    let max_tier = crate::index::header(ctx).and_then(|h| h.max_tier);
+    match target {
+        Target::Server(name) => {
+            let Some(row) = crate::index::find_server(ctx, name).unwrap_or(None) else {
+                if crate::index::header(ctx).is_none() {
+                    return Ok(());
+                }
+                return Err(
+                    Error::not_found(format!("no Proton server is called '{name}'"))
+                        .with_hint(format!("fproton servers --search {name}")),
+                );
+            };
+            if let Some(max) = max_tier {
+                if row.tier > max {
+                    return Err(Error::not_found(format!(
+                        "{name} is a tier-{} server and this account is tier {max}",
+                        row.tier
+                    ))
+                    .with_hint("fproton servers --tier free"));
+                }
+            }
+            Ok(())
+        }
+        Target::Country(cc) => {
+            let Ok(countries) = crate::index::countries(ctx) else {
+                return Ok(());
+            };
+            if countries.is_empty() || countries.iter().any(|c| &c.country == cc) {
+                Ok(())
+            } else {
+                Err(Error::not_found(format!("Proton has no servers in '{cc}'"))
+                    .with_hint("fproton countries"))
+            }
+        }
+        Target::City(city) => {
+            let Ok(cities) = crate::index::cities(ctx, "") else {
+                return Ok(());
+            };
+            if cities.is_empty() {
+                return Ok(());
+            }
+            let matches: Vec<&crate::index::CityRow> = cities
+                .iter()
+                .filter(|c| c.city.eq_ignore_ascii_case(city))
+                .collect();
+            match matches.len() {
+                0 => Err(
+                    Error::not_found(format!("Proton has no servers in '{city}'"))
+                        .with_hint("fproton cities"),
+                ),
+                1 => Ok(()),
+                _ => {
+                    let where_ = matches
+                        .iter()
+                        .map(|c| c.country.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Err(
+                        Error::ambiguous(format!("'{city}' exists in several countries: {where_}"))
+                            .with_hint(format!(
+                                "fproton servers --city \"{city}\" --country {}",
+                                matches[0].country
+                            )),
+                    )
+                }
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Which server the tunnel is on right now, if any.
+fn current_server(ctx: &Context) -> Option<(String, Option<String>)> {
+    let link = crate::nm::link_state(ctx).ok()?;
+    if !link.up {
+        return None;
+    }
+    let name = link
+        .nm_connection
+        .as_deref()?
+        .strip_prefix("ProtonVPN ")?
+        .to_string();
+    let country = crate::index::find_server(ctx, &name)
+        .unwrap_or(None)
+        .map(|r| r.country);
+    Some((name, country))
+}
+
+/// How an action ended, for the history row (§5 `HistoryEntry`).
+fn result_of(outcome: &Result<(), Error>) -> (crate::state::HistoryResult, Option<String>) {
+    use crate::state::HistoryResult as R;
+    match outcome {
+        Ok(()) => (R::Ok, None),
+        Err(Error::Interrupted) => (R::Cancelled, Some("interrupted".to_string())),
+        Err(e) if e.exit_code() == 5 && e.to_string().contains("deadline") => {
+            (R::Timeout, Some(e.code_name().to_string()))
+        }
+        Err(e) => (R::Error, Some(e.code_name().to_string())),
+    }
+}
+
+/// Record `pending` before the engine spawns anything (§8).
+fn begin(
+    ctx: &Context,
+    action: crate::status::PendingAction,
+    target: Option<&Target>,
+    deadline_sec: u64,
+) -> std::time::Instant {
+    // The pid is not known until the child has been reaped, so §5's `pending.pid`
+    // stays null for the life of the record rather than carrying a guess.
+    let _ = crate::state::set_pending(
+        ctx,
+        crate::status::Pending {
+            action,
+            target: target.map(|t| t.to_string()),
+            started_at: crate::now_rfc3339(),
+            deadline_sec,
+            elapsed_sec: 0,
+            pid: None,
+        },
+    );
+    std::time::Instant::now()
+}
+
+/// Clear `pending`, append the history row, and remember the error (§5).
+#[allow(clippy::too_many_arguments)]
+fn finish(
+    ctx: &Context,
+    action: crate::state::HistoryAction,
+    target: Option<&Target>,
+    server: Option<String>,
+    country: Option<String>,
+    started: std::time::Instant,
+    outcome: &Result<(), Error>,
+) -> u64 {
+    let duration_sec = started.elapsed().as_secs();
+    let (result, code_name) = result_of(outcome);
+    let _ = crate::state::clear_pending(ctx);
+    let _ = crate::state::push_history(
+        ctx,
+        crate::state::HistoryEntry {
+            at: crate::now_rfc3339(),
+            action,
+            target: target.map(|t| t.to_string()),
+            server,
+            country,
+            engine: ctx.settings.engine.clone(),
+            result,
+            code_name,
+            duration_sec,
+        },
+    );
+    if let Err(e) = outcome {
+        let _ = crate::state::set_last_error(ctx, e, None);
+    }
+    duration_sec
+}
+
 // ---------------------------------------------------------------- frozen API
 
 /// Connect to `target`.
@@ -225,22 +392,196 @@ pub struct Connected {
 /// the engine exits — callers (main.rs and the TUI) must not duplicate either.
 /// Polls `cancel` at least every 250 ms; on cancel it SIGTERM/SIGKILLs the child
 /// group and returns `Err(Error::Interrupted)`. Never touches stdout/stderr.
-pub fn connect(
-    _ctx: &Context,
-    _target: &Target,
-    _cancel: &CancelToken,
-) -> Result<Connected, Error> {
-    Err(Error::unimplemented("engine::connect"))
+pub fn connect(ctx: &Context, target: &Target, cancel: &CancelToken) -> Result<Connected, Error> {
+    resolve(ctx, target)?;
+
+    // Already there? Only an exact server target can be answered without spawning:
+    // for `fastest` and the feature targets, only Proton knows what "there" means.
+    if let (Target::Server(name), Some((current, country))) = (target, current_server(ctx)) {
+        if current.eq_ignore_ascii_case(name) {
+            return Ok(Connected {
+                target: target.to_string(),
+                server: Some(current),
+                country,
+                engine: ctx.settings.engine.clone(),
+                duration_sec: 0,
+                already_connected: true,
+            });
+        }
+    }
+
+    let deadline = ctx.timeouts.connect();
+    let started = begin(
+        ctx,
+        crate::status::PendingAction::Connect,
+        Some(target),
+        deadline.as_secs(),
+    );
+    let args = crate::cli::connect_args(target);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let outcome = crate::cli::run(ctx, &argv, deadline, cancel).map(|_| ());
+
+    let (server, country) = match &outcome {
+        Ok(()) => current_server(ctx).map_or((None, None), |(s, c)| (Some(s), c)),
+        Err(_) => (None, None),
+    };
+    let duration_sec = finish(
+        ctx,
+        crate::state::HistoryAction::Connect,
+        Some(target),
+        server.clone(),
+        country.clone(),
+        started,
+        &outcome,
+    );
+    outcome?;
+    let _ = crate::state::push_recent(ctx, target);
+    Ok(Connected {
+        target: target.to_string(),
+        server,
+        country,
+        engine: ctx.settings.engine.clone(),
+        duration_sec,
+        already_connected: false,
+    })
 }
 
 /// Reconnect to the last target; `next` picks the next server in the same country by score.
-pub fn reconnect(_ctx: &Context, _next: bool, _cancel: &CancelToken) -> Result<Connected, Error> {
-    Err(Error::unimplemented("engine::reconnect"))
+pub fn reconnect(ctx: &Context, next: bool, cancel: &CancelToken) -> Result<Connected, Error> {
+    let stored = crate::state::load(ctx)?;
+    let last: Option<Target> = stored
+        .recents
+        .first()
+        .and_then(|t| t.parse::<Target>().ok())
+        .or_else(|| {
+            stored
+                .history
+                .iter()
+                .rev()
+                .find(|h| h.action == crate::state::HistoryAction::Connect)
+                .and_then(|h| h.target.as_deref())
+                .and_then(|t| t.parse::<Target>().ok())
+        });
+    let Some(last) = last else {
+        return Err(Error::not_found(
+            "fproton has not connected to anything yet, so there is nothing to reconnect",
+        )
+        .with_hint("fproton connect fastest"));
+    };
+
+    let target = if next { next_server(ctx, &last)? } else { last };
+    // `reconnect` records itself as a reconnect; `connect` would record a connect.
+    let deadline = ctx.timeouts.connect();
+    let started = begin(
+        ctx,
+        crate::status::PendingAction::Reconnect,
+        Some(&target),
+        deadline.as_secs(),
+    );
+    resolve(ctx, &target)?;
+    let args = crate::cli::connect_args(&target);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let outcome = crate::cli::run(ctx, &argv, deadline, cancel).map(|_| ());
+    let (server, country) = match &outcome {
+        Ok(()) => current_server(ctx).map_or((None, None), |(s, c)| (Some(s), c)),
+        Err(_) => (None, None),
+    };
+    let duration_sec = finish(
+        ctx,
+        crate::state::HistoryAction::Reconnect,
+        Some(&target),
+        server.clone(),
+        country.clone(),
+        started,
+        &outcome,
+    );
+    outcome?;
+    let _ = crate::state::push_recent(ctx, &target);
+    Ok(Connected {
+        target: target.to_string(),
+        server,
+        country,
+        engine: ctx.settings.engine.clone(),
+        duration_sec,
+        already_connected: false,
+    })
+}
+
+/// The next server in the same country, by score, wrapping at the end of the list.
+fn next_server(ctx: &Context, last: &Target) -> Result<Target, Error> {
+    let anchor = match last {
+        Target::Server(name) => name.clone(),
+        _ => current_server(ctx).map(|(name, _)| name).ok_or_else(|| {
+            Error::not_found("`--next` needs a known current server to step away from")
+                .with_hint("fproton connect CH#461")
+        })?,
+    };
+    let row = crate::index::find_server(ctx, &anchor)?.ok_or_else(|| {
+        Error::not_found(format!("'{anchor}' is not in the server index"))
+            .with_hint("fproton index --rebuild")
+    })?;
+    let rows = crate::index::servers(
+        ctx,
+        &crate::index::Query {
+            country: Some(row.country.clone()),
+            sort: crate::index::Sort::Score,
+            ..Default::default()
+        },
+    )?;
+    let usable: Vec<&crate::index::ServerRow> = rows
+        .iter()
+        .filter(|r| r.status == 1 && r.tier <= row.tier)
+        .collect();
+    if usable.is_empty() {
+        return Err(
+            Error::not_found(format!("no other usable server in {}", row.country))
+                .with_hint("fproton servers --country CH"),
+        );
+    }
+    let here = usable
+        .iter()
+        .position(|r| r.name.eq_ignore_ascii_case(&anchor));
+    let pick = match here {
+        Some(i) => usable[(i + 1) % usable.len()],
+        None => usable[0],
+    };
+    Ok(Target::Server(pick.name.clone()))
 }
 
 /// Disconnect. `force` tears `proton0` and the killswitch profile down through nmcli.
-pub fn disconnect(_ctx: &Context, _force: bool, _cancel: &CancelToken) -> Result<(), Error> {
-    Err(Error::unimplemented("engine::disconnect"))
+///
+/// `--force` is idempotent: tearing down a device that is already down, or a profile
+/// that is not active, is success, so it stays a safe no-op on a machine with nothing
+/// connected (§4b GREEN).
+pub fn disconnect(ctx: &Context, force: bool, cancel: &CancelToken) -> Result<(), Error> {
+    let deadline = if force {
+        ctx.timeouts.nmcli()
+    } else {
+        ctx.timeouts.disconnect()
+    };
+    let started = begin(
+        ctx,
+        crate::status::PendingAction::Disconnect,
+        None,
+        deadline.as_secs(),
+    );
+    let server = current_server(ctx);
+    let outcome = if force {
+        crate::nm::device_disconnect(ctx, crate::TUNNEL_DEVICE, cancel)
+            .and_then(|()| crate::nm::connection_down(ctx, crate::KILLSWITCH_PROFILE, cancel))
+    } else {
+        crate::cli::run(ctx, &["disconnect"], deadline, cancel).map(|_| ())
+    };
+    finish(
+        ctx,
+        crate::state::HistoryAction::Disconnect,
+        None,
+        server.as_ref().map(|(s, _)| s.clone()),
+        server.and_then(|(_, c)| c),
+        started,
+        &outcome,
+    );
+    outcome
 }
 
 #[cfg(test)]
