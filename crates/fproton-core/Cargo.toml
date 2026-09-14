@@ -1,0 +1,15 @@
+[package]
+name = "fproton-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Proton VPN engine for Omarchy: NetworkManager state, server index, CLI driver, NAT-PMP"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+libc.workspace = true
+fsqlite.workspace = true

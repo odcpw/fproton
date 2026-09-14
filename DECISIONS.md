@@ -1,0 +1,6 @@
+# Decisions log (append-only; newest at the bottom; one dated entry per decision)
+
+- 2026-09-14 · orchestrator · Rebuild as Rust CLI + engine + FrankenTUI + thin QML widget instead of patching the 4.7k-line QML/Python plugin. Reason: the plugin broke from an uncommitted hand patch, and its logic (timeouts, CLI hang handling, cache parsing, NAT-PMP) belongs in tested Rust, mirroring fbittorrent.
+- 2026-09-14 · orchestrator · Two engines behind one trait: `cli` (official protonvpn CLI, hardened with process-group deadlines) as default; `wg` (NetworkManager WireGuard from Proton-generated configs, no Python, no keyring) as the robust alternative. The CLI hangs on this machine today (keyring), so `wg` is the only engine that can connect until the owner repairs the keyring.
+- 2026-09-14 · orchestrator · Server index in fsqlite (FrankenSQLite) built from Proton's own serverlist.json; asupersync RuntimeBuilder.block_on for the async API. Fallback if fsqlite cannot be made to work within two attempts: serde/postcard index behind the same `ServerIndex` API, recorded here.
+- 2026-09-14 · orchestrator · GitHub push deferred: `gh` token is invalid; SSH alias `github-odcpw` works. Owner will push after fixing the keyring/reboot.

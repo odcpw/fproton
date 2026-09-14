@@ -1,0 +1,22 @@
+[package]
+name = "fproton"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Proton VPN for Omarchy: CLI, doctor, FrankenTUI, bar widget backend"
+
+[[bin]]
+name = "fproton"
+path = "src/main.rs"
+
+[dependencies]
+fproton-core = { path = "../fproton-core" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+dirs.workspace = true
+libc.workspace = true
+ftui.workspace = true
+ftui-extras.workspace = true
+unicode-width.workspace = true
