@@ -393,9 +393,11 @@ dependencies = [
  "fproton-core",
  "ftui",
  "ftui-extras",
+ "jiff",
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "toml",
  "unicode-width",
 ]
@@ -404,7 +406,6 @@ dependencies = [
 name = "fproton-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "dirs",
  "jiff",
  "libc",

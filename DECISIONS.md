@@ -38,3 +38,147 @@
   Use 'protonvpn config set <setting> --help' for available values.
   ```
   Values are plausible, not this account's real settings (Proton stores none on disk). `custom-dns` deliberately carries a two-space run inside its own value, so the table parser must split once on the rule-derived boundary, not on every `\s{2,}`.
+- 2026-09-14 · phase-1a · Dependency set frozen: workspace pins serde, serde_json, anyhow, thiserror 2, clap 4.6, dirs 6, toml 1.1, libc, ftui 0.7, ftui-extras 0.7, unicode-width, postcard 1.1 (use-std), sha2 0.10, jiff 0.2. `anyhow` REMOVED from `fproton-core` (core returns `Error` everywhere, never anyhow); `jiff` + `sha2` ADDED to the `fproton` binary (the doctor's run ids and its WriteFile backup hashes live in `crates/fproton/src/doctor/**`). Nobody edits a Cargo.toml after this commit.
+- 2026-09-14 · phase-1a · `Error` is an enum with named fields `{msg, hint}` per variant plus `Interrupted`, built by `Error::usage(..)`-style constructors and `.with_hint(..)`. DESIGN.md §8 spells the getter `hint(&self) -> String`, so the *builder* is `with_hint` and `hint()` stays the getter (returns the attached hint, else the class default; never empty). `Error::unimplemented("x")` is the one stub error: exit 1, message "x is not implemented in this build", hint `fproton capabilities`. Nothing in this build reports success it did not perform.
+- 2026-09-14 · phase-1a · `status.installed.*` are `Option<bool>`, not `bool`. §5's shape rule ("every key always present, unknown = null, never a zero standing in for unknown") outranks the illustrative example, and Phase 1a probes nothing. Phase 1b fills real booleans; consumers test `=== true`.
+- 2026-09-14 · phase-1a · The Phase-1a `status()` returns a schema-valid document with `ok:false`, `state:"error"` and `last_error` = the unimplemented message, rather than a null-filled `ok:true` that would assert a disconnected state it never measured. `state` still follows the §5 truth table (link down, no pending, last_error set → `error`), so the contract is exercised, not faked.
+- 2026-09-14 · phase-1a · `--yes` and `--dry-run` are GLOBAL flags on the root command and are passed into `DoctorArgs`/`SetupArgs` through `#[clap(skip)]` fields, so those structs can grow their own flags without colliding. `disconnect --force` requires `--yes` whether or not stdout is a TTY (§2 says "on a TTY"; the plugin already passes `--yes`, and an agent piping output should not be able to tear the tunnel down by accident). Every mutating command accepts `--dry-run` and prints the plan.
+- 2026-09-14 · phase-1a · Every JSON envelope carries `ok` and `schema` (not only `status` and errors), so a consumer can version-check any response. Envelope keys per command are in `main.rs`; `servers` carries `built_from_mtime` next to the rows.
+- 2026-09-14 · phase-1a · Target parsing normalises before validating: lowercase input is upper-cased (`ch#461` → `CH#461`), `city:"New York"` loses its quotes, and `securecore`/`secure_core`/`best`/`default` are accepted aliases. Validation itself is the §2 regex set, hand-written (no `regex` crate): `is_country_code`, `is_server_name`, `is_city_name` in `engine.rs`, unit-tested against the real name shapes and against `; rm -rf`, `--`, `CH#461 foo`, `$(id)`.
+- 2026-09-14 · phase-1a · `agent::capabilities_json` takes `&Context` (DESIGN.md left the signature open) so it can report the real config/state/index/serverlist paths. It also carries `build_stage` and `build_note` naming the phase this binary was built at; later phases update those two constants in `agent.rs`.
+- 2026-09-14 · phase-1a · `proc::run_with_deadline` is implemented for real: `Command::process_group(0)` (no `pre_exec`), all three stdio piped with stdin closed immediately, stdout/stderr drained on their own threads so a chatty child cannot deadlock the wait loop, a 25 ms poll of deadline + cancel, then SIGTERM to `-pgid` and SIGKILL 2 s later. A deadline is data (`Output.timed_out`), a cancel is `Err(Error::Interrupted)`, a missing program is `Err(Error::Backend)`. `Output` carries the child pid (= its pgid), which also feeds `status.pending.pid`.
+- 2026-09-14 · phase-1a · Phase 1a also implemented, rather than stubbed, the parts that are pure data or pure logic and that later agents must not each re-invent: `State::derive` (§5 truth table), `features_from_raw`, `Settings::{load,save,get,set}` + `settings::validate` + the Proton config whitelist, `cli::is_valid_username`, the RFC-3339 helpers, and `proc::which`. `crates/fproton/src/setup.rs` exists as a frozen stub (`SetupArgs` + `run`) because `main.rs` must dispatch to it and Phase 1b may not edit `main.rs`; Phase 1b replaces its body.
+
+## Phase 1a gate (2026-09-14, real output)
+
+```
+$ cargo build --release
+    Finished `release` profile [optimized] target(s) in 17.07s
+
+$ cargo clippy --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.60s      (no warnings)
+
+$ cargo fmt --check
+                                                                            (no diff)
+
+$ cargo test
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+  (includes proc.rs: deadline kill of `sleep 30` at 0.4 s, whole-process-group kill of
+   `timeout 30 sleep 30` asserted with kill(-pgid, 0) == ESRCH, CancelToken stopping a
+   60 s deadline in < 3 s, missing binary → exit-code-4 error)
+```
+
+```
+$ fproton --help | head -12
+Proton VPN for Omarchy.
+
+Bare `fproton` opens the TUI on a terminal; without a TTY it prints `status --json`.
+Every command accepts --json, and a non-TTY stdout implies it. Agents: start with
+`fproton robot-docs` and `fproton capabilities`.
+
+`status` never spawns the Proton CLI, so it answers even while that CLI is wedged.
+
+Usage: fproton [OPTIONS] [COMMAND]
+
+Commands:
+  status        The whole Status document (schema 1). Never spawns the Proton CLI
+  ... 23 commands: status connect disconnect reconnect servers countries cities index
+      config settings port history recents account signin signout wg doctor setup tui
+      capabilities robot-docs version
+
+$ fproton doctor --help | head -8
+Diagnose the installation, and optionally repair it
+
+Usage: fproton doctor [OPTIONS] [COMMAND]
+
+Commands:
+  undo          Replay a `--fix` run in reverse (exit 13 if a backup is missing or altered)
+  capabilities  List every check, its group and its safety class
+
+$ fproton tui --help | head -6
+Terminal UI: Status · Servers · History
+
+Usage: fproton tui [OPTIONS]
+
+Options:
+      --json               Machine-readable JSON on stdout (errors too, with the same exit code)
+      --servers            Open on the Servers screen
+      --history            Open on the History screen
+```
+
+```
+$ fproton status --json | jq .
+{
+  "ok": false, "schema": 1, "generated_at": "2026-09-14T23:02:48+02:00",
+  "state": "error", "engine": "cli",
+  "installed": {"cli": null, "daemon": null, "gtk_app": null, "wireguard": null, "networkmanager": null},
+  "signed_in": null, "max_tier": null, "account": null,
+  "link": {"up": false, "device": null, "nm_connection": null, "since": null, "uptime_sec": 0, "endpoint": null},
+  "server": null, "traffic": null,
+  "kill_switch": {"active": false, "supported": true},
+  "port_forwarding": {"port": null, "expires_at": null},
+  "config": null,
+  "index": {"servers": null, "built_from_mtime": null, "serverlist_expires_at": null, "loads_expired": null},
+  "pending": null,
+  "cli": {"last_ok_at": null, "hang_suspected": false, "backoff_until": null},
+  "last_error": {"at": "2026-09-14T23:02:48+02:00", "code": 1, "code_name": "failure",
+                 "text": "status is not implemented in this build",
+                 "hint": "fproton capabilities   # what this build actually does"},
+  "warnings": [], "commands": ["fproton capabilities"]
+}
+(jq exit 0; every §5 key present. Shown here in §5 order for readability: the real output
+ is key-sorted because the document passes through serde_json::Value, whose map is a BTreeMap —
+ deterministic, and the shape rule is about keys existing, not about their order.)
+
+$ fproton capabilities | jq -c '{tool,version,contract_version,build_stage,commands:(.commands|length),exit_codes:(.exit_codes|length),targets:.connect_targets}'
+{"tool":"fproton","version":"0.1.0","contract_version":"1.0.0","build_stage":"phase-1a-api-freeze","commands":23,"exit_codes":15,"targets":["fastest","CC","CC#N","city:NAME","p2p","secure-core","tor","random"]}
+(jq exit 0)
+```
+
+Exit-code and policy spot checks (all real output):
+
+```
+$ fproton connect "; rm -rf" --json ; echo exit=$?
+{"code":2,"code_name":"usage","error":"'; rm -rf' is not a connect target; use one of: fastest · CC · CC#N · city:NAME · p2p · secure-core · tor · random","hint":"fproton servers --search <text>","ok":false,"schema":1}
+exit=2
+
+$ fproton disconnect --force --json ; echo exit=$?
+{"code":3,"code_name":"safety","error":"fproton disconnect --force needs --yes; it would run: nmcli device disconnect proton0 && nmcli connection down pvpn-killswitch-ipv6","hint":"fproton disconnect --force --yes   # or add --dry-run to see the plan","ok":false,"schema":1}
+exit=3
+
+$ fproton wg list --json ; echo exit=$?
+{"code":2,"code_name":"usage","error":"`wg` is an unverified experiment and is gated off","hint":"FPROTON_EXPERIMENTAL_WG=1 fproton wg list","ok":false,"schema":1}
+exit=2
+
+$ fproton tui --json ; echo exit=$?          # non-TTY
+{"code":2,"code_name":"usage","error":"the TUI needs a terminal; stdout is not a TTY","hint":"fproton status --json","ok":false,"schema":1}
+exit=2
+
+$ fproton | jq -c '{ok,schema,state}'        # bare + piped ⇒ status --json
+{"ok":false,"schema":1,"state":"error"}
+
+$ script -qec "fproton status" /dev/null | cat -v | head -2      # TTY ⇒ human + colour
+^[[31merror^[[0m  M-bM-^@M-^T
+  protections ^[[2munknown M-bM-^@M-^T the Proton CLI has not answered^[[0m
+$ NO_COLOR=1 script -qec "fproton status" /dev/null | cat -v | head -1
+error  M-bM-^@M-^T
+$ CI=1 script -qec "fproton status" /dev/null | cat -v | head -1
+error  M-bM-^@M-^T
+(--no-color behaves identically)
+
+$ fproton settings --json                     # implemented, not a stub
+{"ok":true,"path":"/home/oliver/.config/fproton/config.toml","problems":[],"schema":1,"settings":{"default_target":"fastest","engine":"cli","notify":false,"timeouts":{"busctl_sec":1,"config_set_sec":20,"connect_sec":90,"disconnect_sec":25,"nmcli_sec":10,"probe_sec":15}}}
+
+$ fproton config set kill-switch permanent --json ; echo exit=$?
+{"code":2,"code_name":"usage","error":"'permanent' is not a value for 'kill-switch'; allowed: off, standard","hint":"fproton config set kill-switch off","ok":false,"schema":1}
+exit=2
+
+$ fproton servers --country CH --json ; echo exit=$?        # honest stub
+{"code":1,"code_name":"failure","error":"index::servers is not implemented in this build","hint":"fproton capabilities   # what this build actually does","ok":false,"schema":1}
+exit=1
+
+$ grep -rnE 'println!|eprintln!|print!|dbg!' crates/fproton-core/src | wc -l
+0                                             # "core is silent" already holds
+```
+
+Not verified at this gate, and why: no timing numbers (`status` and `servers` do no work yet — Phase 1b measures them), no `protonvpn` was executed at all (§1.2: only `--help` is safe, and nothing here needed it), and nothing claims to connect.

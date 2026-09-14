@@ -8,6 +8,9 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/odcpw/fproton"
 
+# Frozen at the Phase 1a gate (DESIGN.md §8): this is the final dependency set.
+# Nobody edits a Cargo.toml afterwards; a later agent missing a crate stops and
+# reports it to the orchestrator instead of adding one.
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,6 +23,9 @@ libc = "0.2"
 ftui = { version = "0.7", features = ["crossterm"] }
 ftui-extras = { version = "0.7", features = ["canvas"] }
 unicode-width = "0.2"
+postcard = { version = "1.1", features = ["use-std"] }
+sha2 = "0.10"
+jiff = "0.2"
 
 [profile.release]
 opt-level = 3
