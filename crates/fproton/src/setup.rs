@@ -615,8 +615,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&stripped)
             .unwrap_or_else(|e| panic!("merged menu is not JSON: {e}\n{stripped}"));
         assert!(v["torrents"].is_object(), "the owner's entries survive");
+        // ids and actions are the contract; labels and glyphs belong to the docs agent.
         assert_eq!(v["protonvpn.connect"]["action"], "fproton connect");
-        assert_eq!(v["protonvpn"]["label"], "Proton VPN");
+        assert!(v["protonvpn"]["label"].is_string());
     }
 
     #[test]
