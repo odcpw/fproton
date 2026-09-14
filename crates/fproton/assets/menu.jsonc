@@ -3,9 +3,9 @@
 // textually before the file's final `}` and never rewrites what is already there.
 // The docs agent may change labels and glyphs; ids and actions are the contract.
 {
-  "protonvpn": {"icon":"󰦝","label":"VPN","aliases":["vpn","proton","protonvpn"]},
+  "protonvpn": {"icon":"󰦝","label":"Proton VPN","aliases":["vpn","proton","protonvpn"]},
   "protonvpn.connect": {"icon":"󰌘","label":"Connect","action":"fproton connect"},
   "protonvpn.disconnect": {"icon":"󰌙","label":"Disconnect","action":"fproton disconnect"},
   "protonvpn.open": {"icon":"󰆍","label":"Open","action":"omarchy-launch-or-focus-tui --app-id=fproton fproton tui"},
-  "protonvpn.doctor": {"icon":"󰩺","label":"Doctor","action":"omarchy-launch-or-focus-tui --app-id=fprotondoctor fproton doctor"}
+  "protonvpn.doctor": {"icon":"󰓙","label":"Doctor","action":"omarchy-launch-or-focus-tui --app-id=fprotondoctor fproton doctor"}
 }
