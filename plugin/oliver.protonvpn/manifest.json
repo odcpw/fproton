@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "oliver.protonvpn",
+  "name": "Proton VPN",
+  "version": "0.1.0",
+  "author": "Oliver",
+  "license": "MIT",
+  "description": "Proton VPN state, quick connect and protections in the Omarchy bar, via fproton.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Proton VPN",
+    "description": "Connect, pick a country, watch the tunnel, and open the fproton TUI or doctor.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "binary": "fproton",
+      "refreshIntervalSec": 3,
+      "idleRefreshIntervalSec": 8,
+      "notifications": "off",
+      "defaultTarget": "fastest",
+      "tuiCommand": "omarchy-launch-or-focus-tui --app-id=fproton fproton tui"
+    },
+    "schema": [
+      { "key": "binary", "type": "string", "label": "fproton binary", "defaultValue": "fproton" },
+      { "key": "refreshIntervalSec", "type": "integer", "label": "Refresh while open (seconds)", "min": 1, "max": 60, "step": 1, "defaultValue": 3 },
+      { "key": "idleRefreshIntervalSec", "type": "integer", "label": "Refresh while closed (seconds)", "min": 2, "max": 600, "step": 1, "defaultValue": 8 },
+      { "key": "notifications", "type": "string", "label": "Notify on connect/disconnect (on/off)", "defaultValue": "off" },
+      { "key": "defaultTarget", "type": "string", "label": "Default connect target", "defaultValue": "fastest" },
+      { "key": "tuiCommand", "type": "string", "label": "TUI launch command", "defaultValue": "omarchy-launch-or-focus-tui --app-id=fproton fproton tui" }
+    ]
+  }
+}

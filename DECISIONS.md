@@ -567,3 +567,67 @@ Not verified at this gate, and why:
 - **A real `menu_entries` fix against the owner's own menu file** was not run; it was
   applied and undone only against a copy inside `$XDG_CONFIG_HOME=$T`. `fproton setup
   --menu` owns that path in the real run.
+
+- 2026-09-15 · plugin · Real line counts for the widget: `Panel.qml` 924 (§6.1 budget 850, explicitly soft), `Service.qml` 360 (≤ 500), `Model.js` 172 (≤ 180), `ProtonIcon.qml` 90 (≤ 90), `manifest.json` 34; QML total 1 374 against the < 1 500 ceiling. The overrun in Panel.qml is the section machinery (`navSections`/`sectionCount`/`moveCursor`) plus the four reusable row components; the Tailscale panel spends 1 273 lines on a smaller model.
+- 2026-09-15 · plugin · **`omarchy-shell shell rescanPlugins` does not re-read the QML of an already-loaded symlinked plugin on this machine.** Verified by appending a deliberate syntax error to `Panel.qml`: the rescan logged nothing, the widget kept running the old code, and `tests/plugin-smoke.sh` passed 19/0. `omarchy restart shell` then reported `WARN qml: Plugin widget oliver.protonvpn failed: …Panel.qml:924:1: Syntax error` and the IPC target vanished. (`shell.qml:1470` guards its reload with `if (typeof Qt.clearComponentCache === "function")`.) The dev loop for this widget is therefore `omarchy restart shell`, not the rescan DESIGN §6.8 names; every screenshot below was taken after a restart.
+- 2026-09-15 · plugin · Because of the above, `tests/plugin-smoke.sh` grew two checks §6.9 did not ask for: a `qmllint` syntax gate (`/usr/lib/qt6/bin/qmllint`, filtered to `Syntax error|[syntax]` because `qs.Ui`/`qs.Commons` cannot be resolved outside the shell's import path), which does catch the broken file, and an `omarchy-shell oliver.protonvpn cursor` probe, which proves the widget instantiated rather than merely that the journal is quiet. `--static` skips the reload half for a machine with no shell running.
+- 2026-09-15 · plugin · The "Taking long… force disconnect" row fires at `elapsed_sec >= min(deadline_sec, 15)`, not at §6.6's `elapsed_sec >= deadline_sec`. §5 has `status` retire a pending the instant it passes its deadline, so the literal condition is only true for the gap between the two polls and the row would never be seen; 15 s is the case it exists for (a connect with 75 s still to run and no other way out). Observed live: `fproton connect fastest --timeout 25` from a terminal, panel showed the row at 17 s and `cursor` listed section `hung`.
+- 2026-09-15 · plugin · The country list is alphabetical by country name, capped at 8 rows with an "N more — press / to filter" line. Sorted by load (the first cut) the default view was Congo/Mauritania/Libya/Macao — every 0 %-load country nobody is looking for — and 149 rows is more than a panel should instantiate. `/` filters over all 149.
+- 2026-09-15 · plugin · `Service.checkBinary()` re-checks when the binary name changes under it (`onBinChanged`), and its `which` handler discards an answer about a name that is no longer current. Without that, editing the `binary` setting left the widget polling a name that does not exist while still claiming the last good Status: the in-flight `which fproton` answered for `fproton-nope`. Verified both directions by `omarchy bar set oliver.protonvpn binary fproton-nope` (panel: "fproton is not installed or not on PATH (~/.local/bin)", bar icon dim + crossed + badge) and back (alive again with no restart). The user's `shell.json` was restored byte-for-byte afterwards.
+- 2026-09-15 · plugin · A missing binary pauses polling entirely until the panel is opened again (§6.4), rather than re-running `which` on every tick — at the idle interval that would be a spawn every 8 s forever.
+- 2026-09-15 · plugin · The `tuiCommand` setting is honoured through `Model.safeArgv`: the string is split on whitespace and every token must match `^[A-Za-z0-9._:@/=+-]+$`, otherwise the constant argv `["omarchy-launch-or-focus-tui","--app-id=fproton","fproton","tui"]` is used. Nothing is ever joined into a string, so the `eval` inside `omarchy-launch-or-focus-tui` only ever sees inert tokens. README (docs agent) documents the setting as working, and this is how it works without breaking §1.5.
+- 2026-09-15 · plugin · §6.6's section list has no reconnect row, so `reconnect` / `reconnect --next` are reachable only through the widget's own `IpcHandler` (`reconnect`, `nextServer`) — a keybinding or menu entry can call them. `cursor` is a test hook returning `{section,index,active,opened,sections,filter,alive,binaryMissing,state}`; `tests/plugin-smoke.sh` and every keyboard check in this gate use it instead of screenshots.
+- 2026-09-15 · plugin · Actions get no client-side watchdog (the status poll does). Every action argv is an `fproton` command that carries its own process-group deadline — 90 s for connect, 25 s for disconnect — so a hung action ends on its own; a second watchdog in QML could only kill fproton while the Proton CLI it spawned kept running.
+- 2026-09-15 · plugin · Notifications stay default-off and the transition path additionally refuses to fire on the first Status of a session (`_seenStatus`), so a shell restart into a connected tunnel is not announced as a connect.
+
+## Phase 2 plugin gate (2026-09-15, real output)
+
+```
+$ omarchy-plugin-validate plugin/oliver.protonvpn     (silent, exit 0)
+
+$ tests/plugin-smoke.sh
+plugin-smoke: /home/oliver/Projects/odcpw/fproton/plugin/oliver.protonvpn
+  ok    omarchy-plugin-validate
+  ok    manifest id is oliver.protonvpn … kinds/entryPoint/defaultSection/allowMultiple
+  ok    manifest.json Panel.qml Service.qml ProtonIcon.qml Model.js README.md exist
+  ok    qmllint: no syntax errors
+  ok    Panel.qml sets manageIpc: false
+  ok    no execDetached(["bash" …])        ok    no bar.run()
+  ok    every manifest default has an in-code fallback
+  ok    rescanPlugins                      ok    journal carries no load failure
+  ok    widget is loaded (cursor: {"section":"header",…,"alive":true,"state":"disconnected"})
+plugin-smoke: 20 passed, 0 failed
+```
+
+Observed on this machine (screenshots in the agent's scratch dir, `grim` + `magick` crops):
+
+- The Proton mark is in the bar immediately before `omarchy.tailscale`, and the panel opens.
+  Icon states seen for real: dim + crossed + badge (fproton missing), un-crossed + badge
+  (a `warn` Status warning — tailscale0 contesting the route), and the hero switch throwing
+  to "on" the instant a connect is queued.
+- Panel sections rendered against real Status: hero (CH#461 · NOT CONNECTED / ERROR /
+  CONNECTING…), Location/Server/Uptime/Traffic detail rows, the three real warnings with
+  their hints, QUICK CONNECT, COUNTRIES (Afghanistan… Australia + "141 more"), PROTECTIONS
+  "unknown — Proton CLI not responding" with Refresh / Run doctor, footer Open TUI · Doctor ·
+  Sign out.
+- Keyboard: `j`/`k`/arrows move within and between sections (`cursor` read after each key),
+  `/` opens the filter and "switz" narrows 149 countries to Switzerland (811 servers, from
+  40 %, free), Esc inside the filter closes the filter and leaves the panel open, Enter on a
+  warning copied `tailscale set --exit-node=` to the clipboard (restored afterwards), `t`
+  closed the panel and launched the TUI command.
+- Actions reached fproton for real, from the panel, and were recorded in `fproton history`:
+  `connect AL` (00:09:39, killed at its 90 s deadline), `connect fastest` (refused by the
+  60 s hang backoff), `disconnect` (exit 5 upstream) and `disconnect --force` (ok, and both
+  NM profiles stayed inactive — the §4b GREEN no-op).
+
+Not verified, and why:
+
+- **The connected icon state, traffic rows and the protections toggles.** Nothing on this
+  machine can connect (§4b RED), and `status.config` stays null while the Proton CLI is
+  wedged, so the panel only ever renders the "Protections unknown" branch. The toggle/cycle
+  code paths for kill-switch, NetShield and port-forwarding were never executed.
+- **The RECENT section.** `fproton recents` returns `[]` until a connect succeeds, so the
+  section correctly renders nothing — which is all that was observed.
+- **Notifications.** Default off; `notifications: "on"` was never set, so
+  `omarchy-notification-send` has never been called by this widget.
+- **The forwarded-port copy row.** Needs `status.port_forwarding.port`, which needs a tunnel.
