@@ -1178,6 +1178,82 @@ pub fn rebuild(ctx: &Context, cancel: &CancelToken) -> Result<IndexStats, Error>
     })
 }
 
+/// Everything `status` needs to know about the index, from **one** 4 KiB read.
+#[derive(Clone, Debug)]
+pub struct IndexSummary {
+    pub info: IndexInfo,
+    /// The signed-in account's entitlement, as Proton's list recorded it (§5).
+    pub max_tier: Option<u8>,
+    pub freshness: Freshness,
+}
+
+/// The index as it stands: header facts, entitlement and freshness in one call.
+/// Never rebuilds and never parses the 24 MB source.
+pub fn summary(ctx: &Context) -> IndexSummary {
+    let head = read_head(ctx);
+    let freshness = match (source_facts(ctx), &head) {
+        (None, _) => Freshness::SourceMissing,
+        (Some(_), None) => Freshness::Missing,
+        (Some((nanos, len)), Some((h, _))) => {
+            if h.source_mtime_unix_nanos == nanos && h.source_len == len {
+                Freshness::Fresh
+            } else {
+                Freshness::Stale
+            }
+        }
+    };
+    let now = crate::state::unix_now() as i64;
+    match head {
+        None => IndexSummary {
+            info: IndexInfo::unknown(),
+            max_tier: None,
+            freshness,
+        },
+        Some((header, meta)) => IndexSummary {
+            info: IndexInfo {
+                servers: Some(header.server_count),
+                built_from_mtime: crate::rfc3339_from_unix(
+                    (header.source_mtime_unix_nanos / 1_000_000_000) as i64,
+                ),
+                serverlist_expires_at: meta
+                    .serverlist_expires_unix
+                    .and_then(crate::rfc3339_from_unix),
+                loads_expired: meta.loads_expire_unix.map(|t| t <= now),
+            },
+            max_tier: header.max_tier,
+            freshness,
+        },
+    }
+}
+
+/// The snapshot's header, without rebuilding or parsing the source. `None` when there
+/// is no snapshot this build can read.
+pub fn header(ctx: &Context) -> Option<IndexHeader> {
+    read_head(ctx).map(|(h, _)| h)
+}
+
+/// One server by name, from the snapshot **as it stands** — never rebuilds, so
+/// `status` can join its link to the index inside its 50 ms budget.
+pub fn find_server(ctx: &Context, name: &str) -> Result<Option<ServerRow>, Error> {
+    let Some(snap) = read_bytes(ctx)? else {
+        return Ok(None);
+    };
+    let (_, rest) = skip_blocks(ctx, &snap.bytes[snap.offset..])?;
+    // Decode row by row and stop at the first match: the average lookup touches half
+    // the block instead of materialising all 18 221 rows.
+    let (count, mut rest) =
+        postcard::take_from_bytes::<u64>(rest).map_err(|e| broken(ctx, "server", e))?;
+    for _ in 0..count {
+        let (row, tail) = postcard::take_from_bytes::<StoredServerRef>(rest)
+            .map_err(|e| broken(ctx, "server", e))?;
+        if row.name.eq_ignore_ascii_case(name) {
+            return Ok(Some(row.to_row()));
+        }
+        rest = tail;
+    }
+    Ok(None)
+}
+
 /// Header facts only; never rebuilds, never parses the 24 MB source (`status` uses this).
 pub fn info(ctx: &Context) -> Result<IndexInfo, Error> {
     let Some((header, meta)) = read_head(ctx) else {

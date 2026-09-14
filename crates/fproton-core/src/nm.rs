@@ -79,10 +79,8 @@ fn check(out: Output, what: &str, deadline: Duration) -> Result<Output, Error> {
             .code
             .map(|c| c.to_string())
             .unwrap_or_else(|| "on a signal".to_string());
-        return Err(
-            Error::upstream(format!("{what} exited {status}: {tail}"))
-                .with_hint("fproton doctor --only network"),
-        );
+        return Err(Error::upstream(format!("{what} exited {status}: {tail}"))
+            .with_hint("fproton doctor --only network"));
     }
     Ok(out)
 }
@@ -228,7 +226,11 @@ pub fn traffic(ctx: &Context, device: &str) -> Result<Option<Traffic>, Error> {
 /// "not an active connection" is success: the command is idempotent by contract (§4).
 pub fn connection_down(ctx: &Context, name: &str, cancel: &CancelToken) -> Result<(), Error> {
     let deadline = ctx.timeouts.nmcli();
-    let out = run_with_deadline(&[PROGRAM, "connection", "down", name], deadline, Some(cancel))?;
+    let out = run_with_deadline(
+        &[PROGRAM, "connection", "down", name],
+        deadline,
+        Some(cancel),
+    )?;
     if !out.timed_out && !out.success() && is_already_down(&out.stderr_string()) {
         return Ok(());
     }

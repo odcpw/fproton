@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::context::Context;
 use crate::engine::Target;
 use crate::error::Error;
-use crate::status::{CliState, Pending, PortForwarding, ProtonConfig, Traffic};
+use crate::status::{Account, CliState, Pending, PortForwarding, ProtonConfig, Traffic};
 
 /// How many history entries survive a write.
 pub const HISTORY_CAP: usize = 200;
@@ -108,6 +108,8 @@ pub struct StateFile {
     pub link_up_since: Option<String>,
     /// The last error, as `status.last_error` reports it.
     pub last_error: Option<crate::status::LastError>,
+    /// The Proton account name from the last successful `protonvpn info` (§5).
+    pub account: Option<crate::status::Account>,
 }
 
 // ---------------------------------------------------------------- the store
@@ -262,6 +264,17 @@ pub fn set_config_cache(ctx: &Context, config: &ProtonConfig) -> Result<(), Erro
     update(ctx, |s| s.config = Some(config))
 }
 
+/// Cache the account name from a successful `protonvpn info` (§5 `account`).
+pub fn set_account(ctx: &Context, name: &str) -> Result<Account, Error> {
+    let account = Account {
+        name: name.to_string(),
+        cached_at: crate::now_rfc3339(),
+    };
+    let stored = account.clone();
+    update(ctx, |s| s.account = Some(stored))?;
+    Ok(account)
+}
+
 /// Cache the Secret Service answer for [`SIGNED_IN_CACHE_SEC`] (§5 `signed_in`).
 pub fn set_signed_in(ctx: &Context, signed_in: Option<bool>) -> Result<(), Error> {
     let at = crate::now_rfc3339();
@@ -384,7 +397,11 @@ mod tests {
         for t in ["CH", "p2p", "CH#461", "CH"] {
             push_recent(&ctx, &t.parse::<Target>().unwrap()).unwrap();
         }
-        let got: Vec<String> = recents(&ctx).unwrap().iter().map(|t| t.to_string()).collect();
+        let got: Vec<String> = recents(&ctx)
+            .unwrap()
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
         assert_eq!(got, vec!["CH", "CH#461", "p2p"]);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -406,7 +423,11 @@ mod tests {
         )
         .unwrap();
         let p = pending(&ctx).unwrap().expect("pending");
-        assert!((4..=7).contains(&p.elapsed_sec), "elapsed {}", p.elapsed_sec);
+        assert!(
+            (4..=7).contains(&p.elapsed_sec),
+            "elapsed {}",
+            p.elapsed_sec
+        );
         assert!(p.is_live());
         clear_pending(&ctx).unwrap();
         assert!(pending(&ctx).unwrap().is_none());

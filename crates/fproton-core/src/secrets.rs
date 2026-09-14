@@ -93,7 +93,10 @@ fn quoted(text: &str) -> Vec<String> {
 
 /// Parse `o "/org/freedesktop/secrets/collection/X"`.
 pub fn parse_object_path(text: &str) -> Option<String> {
-    quoted(text).into_iter().next().filter(|p| p.starts_with('/'))
+    quoted(text)
+        .into_iter()
+        .next()
+        .filter(|p| p.starts_with('/'))
 }
 
 /// Parse `ao 3 "…" "…" "…"` or `aoao 2 "…" "…" 0` into every path it names.

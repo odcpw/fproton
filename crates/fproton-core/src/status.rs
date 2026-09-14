@@ -6,14 +6,20 @@
 //! * timestamps are RFC 3339 **with local offset** (jiff);
 //! * durations are integers named `*_sec`.
 //!
-//! The deriving code is Phase 1b. [`State::derive`] (the §5 truth table) is real here
-//! because every consumer depends on it being a total function.
+//! [`State::derive`] is the §5 truth table, and it is a total function: there is no
+//! `unknown` state.
+//!
+//! [`status`] never spawns `protonvpn` and never rebuilds the index. Its three
+//! external probes — one `nmcli`, one `systemctl is-active`, one `busctl` — run on
+//! their own threads, so the wall clock is the slowest of them rather than their sum.
 
 use serde::{Deserialize, Serialize};
 
 use crate::context::Context;
 use crate::error::Error;
 use crate::index::IndexInfo;
+use crate::nm;
+use crate::state::{self, StateFile};
 
 /// Schema version of every fproton JSON envelope.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -343,26 +349,476 @@ impl Status {
 
 // ---------------------------------------------------------------- frozen API
 
+// ---------------------------------------------------------------- probes
+
+/// Proton's last connection, as the CLI persisted it (§1.3). Read-only, and never
+/// the fields that carry key material: `x25519pk` and `server_id` are not declared
+/// here, so they cannot reach any output.
+#[derive(Debug, Deserialize)]
+struct Persistence {
+    /// The **NetworkManager UUID** of that server's profile (§5).
+    connection_id: Option<String>,
+    server: Option<PersistenceServer>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersistenceServer {
+    server_name: Option<String>,
+    server_ip: Option<String>,
+    wireguard_ports: Option<PersistencePorts>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersistencePorts {
+    #[serde(default)]
+    udp: Vec<u16>,
+}
+
+impl Persistence {
+    fn read(ctx: &Context) -> Option<Persistence> {
+        let text = std::fs::read_to_string(ctx.paths.connection_persistence()).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+    /// `146.70.226.194:443` — the endpoint §5 shows for CH#461.
+    fn endpoint(&self) -> Option<String> {
+        let server = self.server.as_ref()?;
+        let ip = server.server_ip.as_ref()?;
+        let port = server.wireguard_ports.as_ref()?.udp.first()?;
+        Some(format!("{ip}:{port}"))
+    }
+    fn server_name(&self) -> Option<&str> {
+        self.server.as_ref()?.server_name.as_deref()
+    }
+}
+
+/// `systemctl is-active proton.VPN.service`; `None` when systemctl itself is absent.
+fn daemon_active(ctx: &Context) -> Option<bool> {
+    let out = crate::proc::run_with_deadline(
+        &["systemctl", "is-active", "proton.VPN.service"],
+        ctx.timeouts.nmcli(),
+        None,
+    )
+    .ok()?;
+    if out.timed_out {
+        return None;
+    }
+    // `is-active` exits non-zero for every state but active, and prints the state.
+    Some(out.stdout_string().trim() == "active")
+}
+
+/// The Proton GTK app, by the desktop files its packages install. A file test, not a
+/// spawn: `status` has a 50 ms budget.
+fn gtk_app_installed() -> bool {
+    [
+        "/usr/share/applications/protonvpn-app.desktop",
+        "/usr/share/applications/protonvpn.desktop",
+        "/usr/bin/protonvpn-app",
+    ]
+    .iter()
+    .any(|p| std::path::Path::new(p).exists())
+}
+
+/// Turn the raw `pending` record into (live pending, error it became).
+fn settle_pending(pending: Option<Pending>) -> (Option<Pending>, Option<LastError>) {
+    let Some(p) = pending else {
+        return (None, None);
+    };
+    if p.is_live() {
+        return (Some(p), None);
+    }
+    // A pending past its deadline is a crashed or killed run (§5): it becomes the
+    // last error and stays on disk for `doctor --fix` to clear.
+    let target = p.target.clone().unwrap_or_else(|| "fastest".to_string());
+    let text = format!("{} {target} exceeded {} s", p.action.name(), p.deadline_sec);
+    let e = Error::upstream(text.clone()).with_hint("fproton doctor --fix");
+    (
+        Some(p.clone()),
+        Some(LastError {
+            at: crate::now_rfc3339(),
+            code: e.exit_code(),
+            code_name: e.code_name().to_string(),
+            text,
+            hint: e.hint(),
+        }),
+    )
+}
+
+/// Bytes per second between two sysfs samples, or `None` when a rate cannot be told
+/// honestly (no earlier sample, no elapsed time, or a counter that went backwards).
+fn rate(previous: u64, current: u64, seconds: f64) -> Option<f64> {
+    if seconds <= 0.0 || current < previous {
+        return None;
+    }
+    Some((current - previous) as f64 / seconds)
+}
+
+fn warn(id: &str, severity: Severity, text: impl Into<String>, hint: impl Into<String>) -> Warning {
+    Warning {
+        id: id.to_string(),
+        severity,
+        text: text.into(),
+        hint: hint.into(),
+    }
+}
+
+// ---------------------------------------------------------------- frozen API
+
 /// The whole of §5 from NetworkManager + state + index + a Secret Service probe.
 ///
 /// Never spawns `protonvpn`, never rebuilds the index, budget < 50 ms warm.
-///
-/// **This build is the Phase-1a API freeze**: nothing is probed yet. The document is
-/// schema-valid with every key present, and says so in `last_error` rather than
-/// reporting a state it did not measure.
 pub fn status(ctx: &Context) -> Result<Status, Error> {
-    let mut s = Status::empty(&ctx.settings.engine, crate::now_rfc3339());
-    let e = Error::unimplemented("status");
-    s.ok = false;
-    s.state = State::Error;
-    s.last_error = Some(LastError {
-        at: s.generated_at.clone(),
-        code: e.exit_code(),
-        code_name: e.code_name().to_string(),
-        text: e.to_string(),
-        hint: e.hint(),
+    let generated_at = crate::now_rfc3339();
+    let mut s = Status::empty(&ctx.settings.engine, generated_at.clone());
+    let mut state: StateFile = state::load(ctx)?;
+    let mut state_changed = false;
+
+    // ---- the three external probes, in parallel -------------------------------
+    let need_signed_in = !state::signed_in_is_fresh(&state);
+    let (connections, daemon, proton_items, disk) = std::thread::scope(|scope| {
+        let nm_probe = scope.spawn(|| nm::connections(ctx));
+        let daemon_probe = scope.spawn(|| daemon_active(ctx));
+        let secrets_probe =
+            scope.spawn(|| need_signed_in.then(crate::secrets::search_proton_items));
+        // Proton's persistence file names the last server without asking nmcli, so the
+        // index join runs beside the nmcli call rather than after it.
+        let disk_probe = scope.spawn(|| {
+            let persistence = Persistence::read(ctx);
+            let row = persistence
+                .as_ref()
+                .and_then(|p| p.server_name())
+                .and_then(|name| crate::index::find_server(ctx, name).ok().flatten());
+            (persistence, row, crate::index::summary(ctx))
+        });
+        (
+            nm_probe.join(),
+            daemon_probe.join(),
+            secrets_probe.join(),
+            disk_probe.join(),
+        )
     });
-    s.commands = vec!["fproton capabilities".to_string()];
+    let joined = |what: &str| Error::failure(format!("the {what} probe panicked"));
+    let connections = connections.map_err(|_| joined("NetworkManager"))?;
+    let daemon = daemon.map_err(|_| joined("daemon"))?;
+    let proton_items = proton_items.map_err(|_| joined("Secret Service"))?;
+    let (persistence, persisted_row, index) = disk.map_err(|_| joined("index"))?;
+
+    // ---- installed ------------------------------------------------------------
+    s.installed = Installed {
+        cli: Some(crate::proc::which(crate::cli::PROGRAM).is_some()),
+        daemon,
+        gtk_app: Some(gtk_app_installed()),
+        wireguard: Some(std::path::Path::new("/sys/module/wireguard").exists()),
+        networkmanager: Some(crate::proc::which(nm::PROGRAM).is_some()),
+    };
+
+    // ---- signed_in ------------------------------------------------------------
+    s.signed_in = match proton_items {
+        Some(Ok(items)) => {
+            let answer = Some(!items.is_empty());
+            state.signed_in = answer;
+            state.signed_in_at = Some(generated_at.clone());
+            state_changed = true;
+            answer
+        }
+        // A busctl failure is "unknown", never "signed out" (§5).
+        Some(Err(_)) => None,
+        None => state.signed_in,
+    };
+
+    // ---- link and server ------------------------------------------------------
+    let mut nm_error = None;
+    let link_state = match connections {
+        Ok(conns) => {
+            let link = nm::link_state_from_connections(&conns);
+            s.kill_switch.active = link.killswitch_active;
+            Some((link, conns))
+        }
+        Err(e) => {
+            nm_error = Some(e);
+            None
+        }
+    };
+    let (link, conns) = match link_state {
+        Some((link, conns)) => (link, conns),
+        None => (nm::LinkState::default(), Vec::new()),
+    };
+
+    s.link.up = link.up;
+    s.link.device = link.device.clone();
+    s.link.nm_connection = link.nm_connection.clone();
+
+    // §5 resolution order: (1) the active profile, (2) the persistence file by UUID,
+    // (3) nothing at all. Never a guess, never a match by name order.
+    let mut server_name: Option<String> = None;
+    if link.up {
+        server_name = link
+            .nm_connection
+            .as_deref()
+            .and_then(|n| n.strip_prefix("ProtonVPN ").map(str::to_string));
+        if let Some(p) = &persistence {
+            if p.connection_id.as_deref() == link.uuid.as_deref() {
+                s.link.endpoint = p.endpoint();
+            }
+        }
+    } else if let Some(p) = &persistence {
+        if let Some(uuid) = p.connection_id.as_deref() {
+            if let Some(profile) = conns.iter().find(|c| c.uuid == uuid) {
+                s.link.nm_connection = Some(profile.name.clone());
+            }
+        }
+        server_name = p.server_name().map(str::to_string);
+        s.link.endpoint = p.endpoint();
+    }
+
+    // Uptime is measured from the first moment fproton saw *this* profile up: neither
+    // NetworkManager's terse listing nor sysfs carries a trustworthy start time.
+    if link.up {
+        if state.link_uuid != link.uuid || state.link_up_since.is_none() {
+            state.link_uuid = link.uuid.clone();
+            state.link_up_since = Some(generated_at.clone());
+            state_changed = true;
+        }
+        s.link.since = state.link_up_since.clone();
+        s.link.uptime_sec = s
+            .link
+            .since
+            .as_deref()
+            .and_then(state::seconds_since)
+            .unwrap_or(0);
+    } else if state.link_up_since.is_some() || state.link_uuid.is_some() {
+        state.link_up_since = None;
+        state.link_uuid = None;
+        state_changed = true;
+    }
+
+    if let Some(name) = server_name {
+        // The index join is best-effort and never rebuilds: an unknown name keeps its
+        // name and leaves every derived field null (§5). The row was usually looked up
+        // beside the nmcli call; only an active profile the persistence file does not
+        // name costs a second pass.
+        let row = match persisted_row {
+            Some(r) if r.name.eq_ignore_ascii_case(&name) => Some(r),
+            _ => crate::index::find_server(ctx, &name).unwrap_or(None),
+        };
+        s.server = Some(match row {
+            Some(r) => Server {
+                name: r.name,
+                country: Some(r.country),
+                country_name: r.country_name,
+                city: r.city,
+                lat: r.lat,
+                lon: r.lon,
+                load: Some(r.load),
+                score: Some(r.score),
+                tier: Some(r.tier),
+                features: Some(r.features),
+                features_raw: Some(r.features_raw),
+                entry_ip: r.entry_ip,
+                exit_ip: r.exit_ip,
+            },
+            None => Server {
+                name,
+                country: None,
+                country_name: None,
+                city: None,
+                lat: None,
+                lon: None,
+                load: None,
+                score: None,
+                tier: None,
+                features: None,
+                features_raw: None,
+                entry_ip: None,
+                exit_ip: None,
+            },
+        });
+    }
+
+    // ---- traffic --------------------------------------------------------------
+    if link.up {
+        if let Some(device) = s.link.device.as_deref() {
+            if let Ok(Some(mut sample)) = nm::traffic(ctx, device) {
+                if let Some(prev) = &state.traffic {
+                    let seconds = state::unix_from_rfc3339(&sample.sampled_at)
+                        .zip(state::unix_from_rfc3339(&prev.sampled_at))
+                        .map(|(now, then)| (now - then) as f64)
+                        .unwrap_or(0.0);
+                    sample.rx_bps = rate(prev.rx_bytes, sample.rx_bytes, seconds);
+                    sample.tx_bps = rate(prev.tx_bytes, sample.tx_bytes, seconds);
+                }
+                state.traffic = Some(Traffic {
+                    rx_bps: None,
+                    tx_bps: None,
+                    ..sample.clone()
+                });
+                state_changed = true;
+                s.traffic = Some(sample);
+            }
+        }
+    } else if state.traffic.is_some() {
+        state.traffic = None;
+        state_changed = true;
+    }
+
+    // ---- caches ---------------------------------------------------------------
+    s.config = state.config.clone();
+    s.account = state.account.clone();
+    s.port_forwarding = match (&state.port_forwarding, link.up) {
+        (pf, true) => {
+            let expired = pf
+                .expires_at
+                .as_deref()
+                .and_then(state::unix_from_rfc3339)
+                .is_some_and(|t| t <= state::unix_now() as i64);
+            if expired {
+                PortForwarding::default()
+            } else {
+                pf.clone()
+            }
+        }
+        // §5: both null whenever the link is down.
+        (_, false) => PortForwarding::default(),
+    };
+    s.cli = state.cli.clone();
+
+    // ---- index ----------------------------------------------------------------
+    s.index = index.info.clone();
+    s.max_tier = index.max_tier;
+    let freshness = index.freshness;
+
+    // ---- pending, state and last_error ----------------------------------------
+    let mut pending = state.pending.clone();
+    if let Some(p) = &mut pending {
+        state::refresh_pending(p);
+    }
+    let (pending, from_pending) = settle_pending(pending);
+    let live_pending = pending.as_ref().filter(|p| p.is_live()).map(|p| p.action);
+    s.pending = pending.clone();
+    s.last_error = from_pending.or_else(|| state.last_error.clone());
+    if let Some(e) = &nm_error {
+        s.ok = false;
+        s.last_error = Some(LastError {
+            at: generated_at.clone(),
+            code: e.exit_code(),
+            code_name: e.code_name().to_string(),
+            text: e.to_string(),
+            hint: e.hint(),
+        });
+    }
+    s.state = State::derive(link.up, live_pending, s.last_error.is_some());
+
+    // ---- warnings -------------------------------------------------------------
+    if let Some(left) = state::cli_backoff_remaining(&state) {
+        s.warnings.push(warn(
+            "cli_hang_suspected",
+            Severity::Warn,
+            format!(
+                "the Proton CLI was killed at its deadline; CLI-backed commands are refused for {left}s"
+            ),
+            "fproton doctor --only cli",
+        ));
+    }
+    match freshness {
+        crate::index::Freshness::SourceMissing => s.warnings.push(warn(
+            "serverlist_missing",
+            Severity::Warn,
+            "Proton's server list is not on disk; only the official CLI can fetch it",
+            "fproton doctor --only cache",
+        )),
+        crate::index::Freshness::Missing | crate::index::Freshness::Stale => s.warnings.push(warn(
+            "serverlist_stale",
+            Severity::Info,
+            "the server index was built from an older copy of Proton's server list",
+            "fproton index --rebuild",
+        )),
+        crate::index::Freshness::Fresh => {
+            if s.index.loads_expired == Some(true) {
+                s.warnings.push(warn(
+                    "serverlist_stale",
+                    Severity::Info,
+                    "the server loads in Proton's list have expired; they are shown as last seen",
+                    "fproton index --rebuild",
+                ));
+            }
+        }
+    }
+    if s.config.is_none() {
+        s.warnings.push(warn(
+            "protections_unknown",
+            Severity::Info,
+            "kill switch, NetShield and port forwarding are unknown: only the Proton CLI knows them",
+            "fproton config list",
+        ));
+    }
+    for device in &link.conflicting_tunnels {
+        let hint = if device.starts_with("tailscale") {
+            "tailscale set --exit-node="
+        } else {
+            "fproton doctor --only network"
+        };
+        s.warnings.push(warn(
+            "conflicting_tunnel",
+            Severity::Warn,
+            format!(
+                "{device} is up and will contest the default route and DNS with a Proton tunnel"
+            ),
+            hint,
+        ));
+    }
+    if link.killswitch_active && !link.up {
+        s.warnings.push(warn(
+            "killswitch_orphan",
+            Severity::Warn,
+            format!(
+                "{} is active while {} is down",
+                crate::KILLSWITCH_PROFILE,
+                crate::TUNNEL_DEVICE
+            ),
+            "fproton doctor --only network",
+        ));
+    }
+    if pending.as_ref().is_some_and(|p| !p.is_live()) {
+        s.warnings.push(warn(
+            "stale_pending",
+            Severity::Warn,
+            "a recorded action outlived its deadline and left no result",
+            "fproton doctor --fix",
+        ));
+    }
+    match s.signed_in {
+        Some(false) => s.warnings.push(warn(
+            "not_signed_in",
+            Severity::Warn,
+            "no Proton session was found in the Secret Service",
+            "fproton signin",
+        )),
+        None => s.warnings.push(warn(
+            "secret_service_broken",
+            Severity::Warn,
+            "the Secret Service did not answer, so the session state is unknown",
+            "fproton doctor --only keyring",
+        )),
+        Some(true) => {}
+    }
+
+    // ---- commands -------------------------------------------------------------
+    s.commands = match s.state {
+        State::Connected => vec!["fproton disconnect".to_string()],
+        State::Connecting | State::Disconnecting => vec!["fproton status --json".to_string()],
+        State::Disconnected => vec![format!("fproton connect {}", ctx.settings.default_target)],
+        State::Error => vec!["fproton doctor".to_string()],
+    };
+    if s.warnings.iter().any(|w| w.id == "serverlist_stale") {
+        s.commands.push("fproton index --rebuild".to_string());
+    }
+    if s.signed_in == Some(false) {
+        s.commands.push("fproton signin".to_string());
+    }
+
+    if state_changed {
+        // A cache write must never be the reason `status` fails.
+        let _ = state::save(ctx, &state);
+    }
     Ok(s)
 }
 
@@ -461,5 +917,156 @@ mod tests {
         assert!(p.is_live());
         p.elapsed_sec = 90;
         assert!(!p.is_live());
+    }
+
+    /// A real `status()` on this machine, against Proton's own fixture data: the index
+    /// is built from `tests/fixtures/serverlist-small.json` and the last connection
+    /// from `tests/fixtures/connection_persistence-redacted.json`, so every
+    /// server-derived literal below is the real CH#461 row (§5).
+    #[test]
+    fn status_resolves_the_last_server_from_the_persistence_file_by_uuid() {
+        let dir = std::env::temp_dir().join(format!(
+            "fproton-status-test-{}-{}",
+            std::process::id(),
+            state::unix_now()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut ctx = Context::for_test(&dir).expect("test context");
+        let proton = dir.join("proton");
+        std::fs::create_dir_all(proton.join("connection")).unwrap();
+        std::fs::write(
+            proton.join("serverlist.json"),
+            include_str!("../../../tests/fixtures/serverlist-small.json"),
+        )
+        .unwrap();
+        std::fs::write(
+            proton.join("connection/connection_persistence.json"),
+            include_str!("../../../tests/fixtures/connection_persistence-redacted.json"),
+        )
+        .unwrap();
+        ctx.paths.proton_cache_dir = proton;
+        crate::index::rebuild(&ctx, &crate::proc::CancelToken::new()).expect("index");
+
+        let s = status(&ctx).expect("status answers");
+        let v = serde_json::to_value(&s).unwrap();
+
+        assert_eq!(v["schema"], 1);
+        assert_eq!(v["engine"], "cli");
+        assert_eq!(v["max_tier"], 2, "the fixture's MaxTier");
+
+        // The last connection, resolved by NetworkManager UUID (§5).
+        let server = &v["server"];
+        assert_eq!(server["name"], "CH#461");
+        assert_eq!(server["country"], "CH");
+        assert_eq!(server["country_name"], "Switzerland");
+        assert_eq!(server["city"], "Zurich");
+        assert_eq!(server["load"], 63);
+        assert_eq!(server["score"], 1.8623468195);
+        assert_eq!(server["tier"], 2);
+        assert_eq!(server["features_raw"], 28);
+        assert_eq!(server["features"][0], "p2p");
+        assert_eq!(server["entry_ip"], "146.70.226.194");
+        assert_eq!(v["link"]["endpoint"], "146.70.226.194:443");
+
+        // `state` is whatever the truth table says about the real machine, never a
+        // sixth value, and every key of the document is present.
+        let state_name = v["state"].as_str().unwrap().to_string();
+        assert!([
+            "connected",
+            "connecting",
+            "disconnecting",
+            "disconnected",
+            "error"
+        ]
+        .contains(&state_name.as_str()));
+        for key in [
+            "ok",
+            "schema",
+            "generated_at",
+            "state",
+            "engine",
+            "installed",
+            "signed_in",
+            "max_tier",
+            "account",
+            "link",
+            "server",
+            "traffic",
+            "kill_switch",
+            "port_forwarding",
+            "config",
+            "index",
+            "pending",
+            "cli",
+            "last_error",
+            "warnings",
+            "commands",
+        ] {
+            assert!(v.get(key).is_some(), "status.{key} must always be present");
+        }
+
+        // No zero standing in for unknown: what this build probes is a real boolean,
+        // and what it cannot know stays null.
+        for key in ["cli", "gtk_app", "wireguard", "networkmanager"] {
+            assert!(
+                v["installed"][key].is_boolean(),
+                "installed.{key} is probed, so it must be a real boolean"
+            );
+        }
+        if v["link"]["up"] == false {
+            assert!(v["traffic"].is_null(), "no device, no traffic numbers");
+            assert!(v["port_forwarding"]["port"].is_null());
+        }
+        // The index is reported, never rebuilt, by status.
+        assert_eq!(v["index"]["servers"], 38);
+
+        // §2: no secret-shaped string may appear anywhere in the document.
+        let text = serde_json::to_string(&v).unwrap();
+        for forbidden in ["PrivateKey", "RefreshToken", "AccessToken", "x25519pk"] {
+            assert!(!text.contains(forbidden), "status leaked '{forbidden}'");
+        }
+        assert!(
+            !text.contains("0ym2_1QG0"),
+            "status leaked Proton's server_id from the persistence file"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_pending_action_past_its_deadline_becomes_the_last_error() {
+        let stale = Pending {
+            action: PendingAction::Connect,
+            target: Some("CH#461".into()),
+            started_at: "2026-09-14T22:29:58+02:00".into(),
+            deadline_sec: 90,
+            elapsed_sec: 91,
+            pid: Some(12345),
+        };
+        let (kept, error) = settle_pending(Some(stale));
+        let error = error.expect("a dead pending becomes an error");
+        assert_eq!(error.code, 5);
+        assert_eq!(error.code_name, "upstream");
+        assert_eq!(error.text, "connect CH#461 exceeded 90 s");
+        assert!(kept.is_some(), "the record stays for `doctor --fix`");
+
+        let live = Pending {
+            elapsed_sec: 2,
+            ..kept.unwrap()
+        };
+        let (kept, error) = settle_pending(Some(live));
+        assert!(error.is_none());
+        assert!(kept.unwrap().is_live());
+    }
+
+    #[test]
+    fn a_rate_is_only_reported_when_two_samples_really_bracket_it() {
+        assert_eq!(rate(1_000, 3_000, 2.0), Some(1_000.0));
+        assert_eq!(rate(1_000, 3_000, 0.0), None, "no elapsed time, no rate");
+        assert_eq!(
+            rate(3_000, 1_000, 2.0),
+            None,
+            "a counter reset is not a rate"
+        );
     }
 }
