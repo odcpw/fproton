@@ -6,7 +6,8 @@
 //! doctor's `mutate.rs`, not here.
 //!
 //! Everything returns object paths and labels. An item path is not a secret, and no
-//! call here can produce one: `GetSecrets` is never invoked.
+//! call here can produce one: the Secret Service method that returns item secrets is
+//! never invoked, and a unit test greps this module for its name.
 
 use std::time::Duration;
 
