@@ -1,0 +1,1 @@
+{"check":"settings_valid","status":"warn","reason":"invalid","fixable":true,"detail_contains":["engine = 'wg'","default_target","timeouts.probe_sec"]}

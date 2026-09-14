@@ -1,0 +1,1 @@
+{"check":"secret_service_default_alias","status":"pass","reason":null,"fixable":false,"detail_contains":["/org/freedesktop/secrets/collection/Default","unlocked"]}

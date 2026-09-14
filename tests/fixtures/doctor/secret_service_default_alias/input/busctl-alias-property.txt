@@ -1,0 +1,1 @@
+Failed to get property Label on interface org.freedesktop.Secret.Collection: Object does not exist at path “/org/freedesktop/secrets/collection/Default_5fkeyring”

@@ -1,0 +1,8 @@
+oliwifi:09846e35-eb1f-48f9-be64-d2eed7c61e42:802-11-wireless:wlp0s20f3:yes
+tailscale0:d9ab7bf5-bd55-4a9e-bacb-9bc8e29cb8f2:tun:tailscale0:yes
+lo:64a907ea-91de-4d57-b284-d2467d241270:loopback:lo:yes
+B302:f0832bca-45f2-421b-96d7-47ce2aa30c19:802-11-wireless::no
+Hotel D Bulle:ef25ab7f-53a3-40d6-bc5d-e9a79abaeb8a:802-11-wireless::no
+ProtonVPN CH#461:58d6042d-3c68-4ee2-81d6-77bcc608a95c:wireguard::no
+pvpn-killswitch-ipv6:e687d04b-b08b-487f-ba55-c8f2183020b5:dummy::no
+Wired connection 1:9ec56204-cd7c-3cf4-a752-869b052a6d01:802-3-ethernet::no

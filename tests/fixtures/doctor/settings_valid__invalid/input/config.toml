@@ -1,0 +1,11 @@
+engine = "wg"
+default_target = "; rm -rf"
+notify = false
+
+[timeouts]
+probe_sec = 0
+connect_sec = 90
+disconnect_sec = 25
+config_set_sec = 20
+nmcli_sec = 10
+busctl_sec = 1

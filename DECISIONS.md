@@ -412,3 +412,158 @@ the keyring), so the hero's `connected` colouring, the uptime line, the traffic 
 real counters and the rx `Sparkline` have only been rendered from `traffic == null` /
 `link.up == false` data. The sparkline's own code path (≥ 2 samples) is therefore unexercised
 on this machine; everything else in §7a has a real frame above or a unit test.
+
+- 2026-09-15 · phase-2-doctor · 26 checks, exactly the §7 list, declared as one `CHECKS: &[CheckDef]` table (`id, group, class, severity, title, detect: fn(&Probes) -> Verdict`). `doctor capabilities --json` is generated from that table, so the contract and the behaviour cannot drift; a test asserts every listed check exists and that no Class D check is reported auto-fixable.
+- 2026-09-15 · phase-2-doctor · `Verdict` carries a `reason: Option<&'static str>` next to the status, and `report.json` carries `status`, `reason` **and** a joined `verdict` string (`fail:phantom_collection`, `skip:link_down`). §7 names only `status`; the extra two keys are additive and are what the gate, the table and `jq` filters actually read.
+- 2026-09-15 · phase-2-doctor · The nine parsing detectors are driven by `tests/fixtures/doctor/<check>[__<variant>]/{input/,expect.json}`; `probes::from_fixture_dir` fills the same `Probes` fields the live capture fills and parses them with the same functions (`secrets::parse_*`, `nm::parse_connections`, `serverlist_facts_from_bytes`, `toml` → `Settings` → `settings::validate`), so a fixture exercises the live parse path. Four `__variant` directories cover branches this machine cannot produce today without changing the desktop (an active IPv6 leak guard, three accumulated CLI profiles, a healthy alias, an invalid config.toml); each is a one-field edit of a real capture and `tests/fixtures/doctor/README.md` says exactly which file was edited and why.
+- 2026-09-15 · phase-2-doctor · The 24 MB serverlist is probed into a `ServerlistFacts` struct (`path, size, mtime, logicals, max_tier, ExpirationTime, LoadsExpirationTime, parse_error`) by one pure function over bytes; a unit test serialises the struct and asserts a server name from the input does **not** appear in it. Run artifacts store those facts in `probes/facts.json`, never the body (§7).
+- 2026-09-15 · phase-2-doctor · The `state_dir` writability probe uses `libc::access(W_OK|X_OK)`, not a touch-and-delete, so a detect-only run leaves the state directory byte- *and* mtime-identical. That is what makes the `--fix --dry-run` gate checkable with a checksum rather than a prose claim.
+- 2026-09-15 · phase-2-doctor · `mutate(Action)` refuses any `WriteFile`/`CreateSymlink` outside a declared write-scope list (state, config and cache dirs, `~/.config/omarchy/{plugins,extensions}`, and the one named file `~/.local/share/keyrings/default`) with exit 13. `doctor capabilities --json::write_scopes` prints that list and `--fix --dry-run` prints the blast radius. A unit test tries to write `/etc/passwd` and asserts the refusal.
+- 2026-09-15 · phase-2-doctor · `Action` is the four §7 variants, unchanged. Two consequences worth recording: (a) creating the state directory is `RunArgv{argv: ["mkdir","-p",…], inverse_argv: []}` — an empty inverse, because the doctor never removes a directory; (b) `omarchy bar` has no `remove`, so the `bar put` step's inverse is empty too and the `omarchy plugin disable` recorded for the step before it is what takes the widget out of the bar.
+- 2026-09-15 · phase-2-doctor · `index_fresh`'s repair rebuilds the snapshot into a scratch cache dir under `$TMPDIR`, reads the bytes back and writes them to the real `index.bin` **through the chokepoint**, so the only write to a real path is backed up and hashed like every other. The scratch dir is removed whether the rebuild succeeded or not; a test asserts none is left behind.
+- 2026-09-15 · phase-2-doctor · A `WriteFile` whose target did not exist records `inverse: quarantine_file`: `doctor undo` renames the created file into `runs/<id>/quarantine/<path>` rather than unlinking it. Exit 13 is reserved for a missing or hash-mismatched backup of a file that *did* exist — the §7 meaning — and a unit test tampers with a backup and asserts the refusal plus that the live file was left alone.
+- 2026-09-15 · phase-2-doctor · The run id is `sha256(state_dir|stamp|pid)[..6]`, not the kernel's `sha256(target|stamp)[..6]`. The kernel's formula makes two runs in the same second share a directory on the assumption that the second waits for the first; fproton implements no such wait, and a shared directory would make `undo latest` replay both runs' `actions.jsonl` and would overwrite the first `report.json` — breaking the append-only invariant it was meant to protect. Verified: two `--save` runs inside one second now produce two directories.
+- 2026-09-15 · phase-2-doctor · `--fix` without `--yes` and without `--dry-run` plans everything, applies nothing, and exits 3 `safety` (§2). `--fix --dry-run` exits with the diagnosis code (11 here), because the machine's problems are still there. Class C is skipped with a printed reason unless `--allow-keyring`; before any Class C action runs, the §7 sentence about needing `protonvpn signin` again is printed to stderr.
+- 2026-09-15 · phase-2-doctor · After any action is actually applied, the doctor re-captures its probes and re-runs the affected detectors; a check is reported `fixed` only when its detector now passes, and `applied, still failing` otherwise. Nothing reports a repair it did not measure.
+- 2026-09-15 · phase-2-doctor · `killswitch_orphan`'s "seen in a previous run ≥ 30 s ago" precondition is kept in `state.killswitch_orphan_seen_at` (the field Phase 1b provisioned). The doctor writes it on a detect-only run — the one exception to "a run without --fix writes nothing" — but only when the observation actually changes (set when first seen, cleared when the condition clears) and never under `--dry-run`, so a healthy machine's state dir is untouched. The condition does not hold on this machine today.
+- 2026-09-15 · phase-2-doctor · `serverlist_expired` is a `warn`, never a `fail`: §4 says an expired list is served, not refused, and only the official CLI can refresh it. `serverlist_loads_stale` is `severity: info` for the same reason. Warnings alone exit 0; only `fail` reaches exit 11.
+- 2026-09-15 · phase-2-doctor · `cli_session_probe` runs `protonvpn config list` under `min(8 s, --timeout)` through `proc::run_with_deadline` directly, **not** through `cli::config_list`: the core wrapper short-circuits on the 60 s hang backoff, which would let a previous invocation's backoff answer for the probe instead of the deadline. The doctor also does not write the hang into state — a detector must stay pure.
+
+## Phase 2 doctor gate (2026-09-15, real output on host `t14`)
+
+`fproton doctor --json | jq` — 26 checks, every one a real verdict, **exit 11**:
+
+| check | group | class | verdict | detail (truncated) |
+|---|---|---|---|---|
+| `cli_installed` | cli | D | `pass` | /usr/bin/protonvpn (proton-vpn-cli 1.0.3-1) |
+| `cli_help_fast` | cli | D | `pass` | answered in 201 ms |
+| `cli_session_probe` | cli | D | `fail:hang` | `protonvpn config list` was killed at its deadline after 8030 ms |
+| `daemon_active` | cli | D | `pass` | proton.VPN.service is active |
+| `secret_service_on_bus` | keyring | D | `pass` | owned by gnome-keyring-d (org.kde.secretservicecompat is also activatable) |
+| `secret_service_default_alias` | keyring | C | **`fail:phantom_collection`** | the `default` alias points at …/collection/Default_5fkeyring, listed in Collections but with no exported object; a `service=Proton` item lives in Default; the login pointer file names 'Default_keyring' |
+| `proton_session_item` | keyring | D | `pass` | 2 item(s) with service=Proton in Default |
+| `networkmanager_running` | network | D | `pass` | NetworkManager is active |
+| `wireguard_available` | network | D | `pass` | /sys/module/wireguard is present |
+| `conflicting_tunnel` | network | D | `warn:other_tunnel` | tailscale0 active and will contest the default route and DNS |
+| `stale_proton_profiles` | network | D | `pass` | 1 ProtonVPN profile(s), none stale |
+| `killswitch_orphan` | network | B | `pass` | the IPv6 leak guard is down |
+| `serverlist_present` | cache | D | `pass` | 18221 logical servers, 24432460 bytes, MaxTier 2 |
+| `serverlist_expired` | cache | D | `warn:expired` | expired 0 h 29 min ago; fproton still serves it |
+| `serverlist_loads_stale` | cache | D | `warn:loads_stale` | per-server loads went stale 3 h ago |
+| `index_fresh` | cache | A | `pass` | 18221 servers, built from the source's current mtime |
+| `state_dir` | install | A | `pass` | /home/oliver/.local/state/fproton is writable |
+| `stale_pending_action` | install | A | `pass` | no action is recorded as in flight |
+| `settings_valid` | install | A | `pass` | no config.toml; every setting is at its default |
+| `binary_on_path` | install | D | `pass` | /home/oliver/.local/bin/fproton is first on PATH |
+| `plugin_linked` | install | B | `pass` | …/omarchy/plugins/oliver.protonvpn → …/fproton/plugin/oliver.protonvpn |
+| `plugin_enabled` | install | B | `pass` | oliver.protonvpn is enabled |
+| `menu_entries` | install | B | `warn:missing_entries` | 5 of fproton's menu entries are absent from omarchy-menu.jsonc |
+| `old_plugin_enabled` | install | B | `pass` | io.github.grichard99.omaproton-vpn is 'disabled' |
+| `dns_when_connected` | connected | D | `skip:link_down` | proton0 does not exist; needs a live tunnel (§4b RED) |
+| `tunnel_route_ok` | connected | D | `skip:link_down` | proton0 does not exist; needs a live tunnel (§4b RED) |
+
+`summary` = `{"total":26,"pass":18,"warn":4,"fail":2,"skip":2,"fixable":2,"fixed":0,"fix_failed":0,"planned":0}`.
+Wall clock 8.7 s, of which 8.03 s is the deliberate `cli_session_probe` deadline.
+
+```
+$ fproton doctor --json >/dev/null; echo $?                       11
+$ fproton doctor --fix --dry-run --json >/dev/null; echo $?       11   (diagnosis stands; nothing applied)
+$ fproton doctor --fix --json >/dev/null; echo $?                  3   safety: "add --yes to apply"
+$ fproton doctor --only keyring --json >/dev/null; echo $?        11   ["pass","fail:phantom_collection","pass"]
+$ fproton doctor --only cache --json >/dev/null; echo $?           0   (warnings alone are not a failure)
+$ fproton doctor --only connected --json >/dev/null; echo $?       0   (both checks skip:link_down)
+$ fproton doctor capabilities --json | jq -e '.check_count,(.checks|length),.write_scopes' >/dev/null; echo $?   0
+$ fproton doctor undo latest --json   →  {"code":6,"code_name":"not_found","error":"there is no …/doctor/latest",…}
+```
+
+`--fix --dry-run` changes nothing (the gate, measured, not asserted in prose):
+
+```
+$ sum() { find ~/.local/state/fproton -type f -o -type l | sort | xargs -r sha256sum | sha256sum; }
+$ sum                    52c96885c96a74dff60d8e56821a7afb68cfc8717a523e5629f724e202fe9a53  -
+$ fproton doctor --fix --dry-run --json >/dev/null
+$ sum                    52c96885c96a74dff60d8e56821a7afb68cfc8717a523e5629f724e202fe9a53  -   (identical)
+$ git status --porcelain | wc -l      unchanged (15 before, 15 after)
+$ sha256sum ~/.config/omarchy/extensions/omarchy-menu.jsonc     unchanged
+```
+
+The one planned action it printed, with its blast radius:
+`[B] write /home/oliver/.config/omarchy/extensions/omarchy-menu.jsonc (2701 bytes)`.
+
+Class C, planned and **never applied** (`--dry-run` only, as the brief requires during
+development). The plan is exactly what §7 specifies:
+
+```
+$ fproton doctor --only keyring --fix --allow-keyring --dry-run --json | jq -c '[.actions[]|{class,action}]'
+[{"class":"C","action":"SetAlias default: /org/freedesktop/secrets/collection/Default_5fkeyring
+                                        → /org/freedesktop/secrets/collection/Default"},
+ {"class":"C","action":"write /home/oliver/.local/share/keyrings/default (8 bytes)"}]
+```
+
+Class A/B apply → assert → undo → compare, at the binary level, entirely inside a temp
+tree (`FPROTON_STATE_DIR`, `FPROTON_CACHE_DIR`, `XDG_CONFIG_HOME` all under `$T`, so no
+real desktop file is touched):
+
+```
+$ printf '{ this is not json' > $T/state/state.json
+$ fproton doctor --only install --fix --yes --json | jq -c '{exit:.exit_code,actions:…,fixed:…}'
+{"exit":0,"run_id":"d51b38",
+ "actions":[{"class":"A","action":"write $T/state/state.json (425 bytes)","outcome":"applied"},
+            {"class":"B","action":"symlink $T/config/omarchy/plugins/oliver.protonvpn → …/plugin/oliver.protonvpn","outcome":"applied"},
+            {"class":"B","action":"write $T/config/omarchy/extensions/omarchy-menu.jsonc (856 bytes)","outcome":"applied"}],
+ "fixed":[{"id":"state_dir","fix_outcome":"fixed","verdict":"pass"},
+          {"id":"plugin_linked","fix_outcome":"fixed","verdict":"pass"},
+          {"id":"menu_entries","fix_outcome":"fixed","verdict":"pass"}]}
+
+$ cat $T/state/doctor/latest/actions.jsonl
+{"seq":1,"check":"state_dir","class":"A","action":"write_file","before":{"existed":true,"sha256":"0fb1db0e…","backup":"backups/…/state.json"},"inverse":"restore_file"}
+{"seq":2,"check":"plugin_linked","class":"B","action":"create_symlink","before":{"existed":false},"inverse":"remove_symlink"}
+{"seq":3,"check":"menu_entries","class":"B","action":"write_file","before":{"existed":false,"sha256":null},"inverse":"quarantine_file"}
+
+$ fproton doctor undo latest --json | jq -c '.steps[]|{seq,inverse,outcome}'
+{"seq":3,"inverse":"quarantine_file","outcome":"moved to …/runs/20260914T221106Z__d51b38/quarantine/…/omarchy-menu.jsonc"}
+{"seq":2,"inverse":"remove_symlink","outcome":"removed"}
+{"seq":1,"inverse":"restore_file","outcome":"restored"}
+$ cat $T/state/state.json          { this is not json      (byte-for-byte the corrupt original)
+
+$ fproton doctor --only install --fix --yes --json | jq -c '{fixed:.summary.fixed}'   {"fixed":3}
+$ fproton doctor --only install --fix --yes --json | jq -c '{fixed:.summary.fixed}'   {"fixed":0}   (run twice = run once)
+```
+
+Build and test gate:
+
+```
+$ cargo fmt --check                                     (no diff)
+$ cargo clippy --all-targets -- -D warnings             clean
+$ cargo test                                            51 passed (bin, 21 of them doctor) + 83 passed (core); 0 failed
+$ cargo build --release                                 Finished
+```
+
+Safety greps over every doctor output surface (`doctor --json`, `-v`, `capabilities`,
+`--fix --dry-run --allow-keyring`):
+
+```
+$ … | grep -aoE 'PrivateKey|RefreshToken|AccessToken|x25519pk|X25519PublicKey|[A-Za-z0-9+/]{43}=|keyrings/[A-Za-z_]*\.keyring'
+(no hits)
+$ grep -rnE '"(sh|bash)"|sh -c|Command::new' crates/fproton/src/doctor/     (no hits — argv only, through core::proc)
+$ grep -rl 'LogicalServers|X25519' <a --save run's artifacts>               (no hits — facts, never the body)
+```
+
+Not verified at this gate, and why:
+
+- **No Class C fix was ever applied.** The keyring repair is planned and printed only; the
+  brief forbids applying it during development and the owner will repair the keyring after
+  a reboot. Its inverse (`SetAlias default /`, plus restoring the pointer file's bytes) is
+  therefore recorded but never replayed on this machine.
+- **`killswitch_orphan`'s fixer has never run.** The condition does not hold here (both
+  profiles inactive), and producing it means bringing the IPv6 leak guard up on the owner's
+  machine. Its detector is covered by the `killswitch_orphan__orphan` fixture, which reaches
+  the fixable branch with all four preconditions satisfied.
+- **`plugin_enabled` and `old_plugin_enabled` fixers have never run**: both checks already
+  pass here, so `omarchy plugin enable|disable` was never invoked by the doctor. Their
+  inverses are recorded in the plan, not exercised.
+- **`dns_when_connected` / `tunnel_route_ok`** are `skip:link_down` and stay §4b RED: there
+  has never been a `proton0` on this machine.
+- **A real `menu_entries` fix against the owner's own menu file** was not run; it was
+  applied and undone only against a copy inside `$XDG_CONFIG_HOME=$T`. `fproton setup
+  --menu` owns that path in the real run.

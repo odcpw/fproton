@@ -1,0 +1,1 @@
+{"check":"conflicting_tunnel","status":"warn","reason":"other_tunnel","fixable":false,"detail_contains":["tailscale0"]}

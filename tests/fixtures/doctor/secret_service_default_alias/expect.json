@@ -1,0 +1,12 @@
+{
+ "check": "secret_service_default_alias",
+ "status": "fail",
+ "reason": "phantom_collection",
+ "fixable": true,
+ "detail_contains": [
+  "Default_5fkeyring",
+  "no exported object",
+  "Default",
+  "the login pointer file names 'Default_keyring'"
+ ]
+}

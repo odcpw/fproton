@@ -1,0 +1,1 @@
+ao 3 "/org/freedesktop/secrets/collection/Default_5fkeyring" "/org/freedesktop/secrets/collection/Default" "/org/freedesktop/secrets/collection/session"

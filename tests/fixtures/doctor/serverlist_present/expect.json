@@ -1,0 +1,1 @@
+{"check":"serverlist_present","status":"fail","reason":"too_small","fixable":false,"detail_contains":["38 logical servers"]}

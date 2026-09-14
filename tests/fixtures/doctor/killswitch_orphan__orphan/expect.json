@@ -1,0 +1,1 @@
+{"check":"killswitch_orphan","status":"warn","reason":"orphan","fixable":true,"detail_contains":["pvpn-killswitch-ipv6","IPv6 leak guard"]}
