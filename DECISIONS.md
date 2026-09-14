@@ -302,3 +302,113 @@ around `date +%s%N`, floor measured at 2.5 ms with `true`. Load average was ~3.0
 | doctor `dns_when_connected`, `tunnel_route_ok` | **RED** | e2e prints `skip`: the doctor is a Phase-2 stub | — | never |
 
 Every row of the §4 table appears exactly once above.
+
+## Phase 2 — TUI (2026-09-15)
+
+- 2026-09-15 · tui · `run` gets its exit code out of the ftui loop through an `Arc<AtomicI32>` the model writes: `App::fullscreen(model).run()` consumes the model, so there is no other way to return §7a's "the §4a code of the session's last failed action". Each `ActionDone` stores that action's own `Error::exit_code()` (0 on success); `Ctrl+C` stores 130. The TUI never invents a code.
+- 2026-09-15 · tui · Two `Every` subscriptions, not one: id 1 at 1000 ms drives the `status` poll (dropped while one is in flight) and the theme-mtime check; id 2 at 120 ms drives the spinner, the 10 s expiry of the status-line note and the 80 ms filter debounce. A single 1 s timer would make the spinner stutter and the filter feel dead; a single 120 ms timer would poll `status` eight times too often.
+- 2026-09-15 · tui · `ActionSub` translates the runtime's `StopSignal` into the core `CancelToken` with a watcher thread (`stop.wait_timeout(200 ms)` in a loop) because ftui has no cancel callback — the runtime only drops the subscription and raises the signal. The watcher also exits on an `AtomicBool` the action sets when it finishes, and is joined, so a completed action leaves no thread behind.
+- 2026-09-15 · tui · Long actions are refused, not attempted, while `status.cli.hang_suspected` or a live `cli.backoff_until` says the Proton CLI is wedged (§2's 60 s breaker): `c`, `R`, `n` and plain `d` answer with the breaker's own text and the `fproton doctor` hint. `D` (force) and `i` (index rebuild) touch only nmcli and the cache, so they are never refused.
+- 2026-09-15 · tui · The Servers list carries no `limit`: all 18 221 rows go into `widgets::virtualized::VirtualizedList` and the per-frame item vector is `&ServerRow` + `&Theme` + column widths (no formatting until a row is on screen). The load cell uses `MiniBar::render_string()` inside the row's `Line` (one style per row); the hero draws a real `MiniBar` widget over its load line, with `MiniBarColors` taken from the theme so no colour literal lives outside `theme.rs`.
+- 2026-09-15 · tui · `status.index.servers` is the denominator of the `N/18221 shown` header, not `servers.len()` of an unfiltered query — `status` already carries it and the TUI must not run a second 18 k-row query just to count.
+- 2026-09-15 · tui · The narrow tier (< 60 cols or < 16 rows) renders the hero and one dim line saying `widen to 60×16 for the Servers and History tables`, on every screen, exactly as §7a orders ("status line + hero only"). Below 30×8 the single line is `WrapMode::Word` over at most three rows rather than one cut row: at 28 columns "(need 30x8)" would otherwise be the part that disappears.
+- 2026-09-15 · tui · `S` spawns `omarchy-launch-floating-terminal-with-presentation "fproton signin"` with all three stdio set to `Stdio::null()` — a constant literal argv (§1.5), and a detached child that cannot write into the alternate screen.
+- 2026-09-15 · tui · Real line counts (module bodies, tests excluded; `cargo fmt` style): `mod.rs` 810, `screens.rs` 1026, `subs.rs` 150, `theme.rs` 160 = **2 146 against the §7a budget of 1 200** (2 406 with the 260 lines of unit tests). The overrun is formatting, not features: every §7a screen, state and key is implemented and nothing else is. rustfmt's vertical style costs 3-6 lines per styled span, and the copied `theme.rs` grows from fbittorrent's hand-compacted 92 lines to 160 unchanged in behaviour. Recorded as a miss, not hidden; trimming it means either giving up `cargo fmt --check` (a Phase-3 gate) or cutting screens.
+- 2026-09-15 · tui · A cancelled `connect`/`reconnect` is followed by `disconnect --force` (§7a); `disconnect` and `Rebuild` need no cleanup. Verified live, see the gate transcript below.
+
+### Phase 2 TUI gate (2026-09-15, real output from a tmux pty)
+
+```
+$ cargo clippy --all-targets -- -D warnings      (whole workspace)   clean
+$ cargo fmt --check | grep -c 'src/tui/'                             0
+$ cargo test --bin fproton   test result: ok. 51 passed; 0 failed    (22 of them tui::*)
+$ grep -rnE 'println!|eprintln!|print!|dbg!' crates/fproton/src/tui/ | wc -l    0
+```
+
+Driven with `tmux new-session -d -s … -x W -y H "target/release/fproton tui"` + `send-keys` +
+`capture-pane -p`. Every frame below is a real capture.
+
+```
+120x40, Status (the machine's real state: the Proton CLI was killed at its deadline)
+[ 1 Status ]  2 Servers    3 History                                        cli omarchy
+╭ Proton VPN ───────────────────────────────╮╭ Protections ──────────────────────────╮
+│ ● Last action failed                      ││ kill switch  inactive                 │
+│ CH#461 Switzerland · Zurich               ││ settings unknown — the Proton CLI is … │
+│ load ████████░░░░ 63%                     ││ hint: fproton doctor                  │
+│ tier 2 · p2p · streaming · ipv6           │╰───────────────────────────────────────╯
+│ endpoint  146.70.226.194:443              │╭ Warnings ─────────────────────────────╮
+│ link      down                            ││ serverlist_stale the server loads in  │
+│ the Proton CLI was killed at its deadline…││ Proton's list have expired…           │
+│ hint: fproton doctor --only cli           ││   hint: fproton index --rebuild       │
+│ fproton doctor   fproton index --rebuild  ││ protections_unknown …                 │
+╰───────────────────────────────────────────╯│ conflicting_tunnel tailscale0 is up … │
+╭ Traffic ──────────────────────────────────╮╰───────────────────────────────────────╯
+│ traffic unavailable (no proton0 device)   │╭ Recents ──────────────────────────────╮
+╰───────────────────────────────────────────╯│ none yet                              │
+● error CH#461                                                                 ? help
+
+120x40, Servers (index present, 18 221 rows in a VirtualizedList; scrollbar at the right)
+╭ Servers  18221/18221 shown ──────────────────────────────────────────────────────────╮
+│ / filter by name, country or city                              f:any  t:any  o:score │
+│ NAME          COUNTRY          CITY             LOAD           SCORE TIER  FEATURES  │
+│ CH#461        Switzerland      Zurich           ████░░░  63%    1.86 plus  p2p …   █ │
+│ CH#473        Switzerland      Zurich           █████░░  66%    1.86 plus  p2p …   │ │
+
+after `/` + "reykjavik" (80 ms debounce) and `f` (feature chip → p2p)
+╭ Servers  24/18221 shown ─────────────────────────────────────────────────────────────╮
+│ / reykjavik                                                    f:p2p  t:any  o:score │
+│ IS#11         Iceland          Reykjavik        ████░░░  60%    5.97 plus  p2p strea…│
+
+100x24, History (`widgets::table::Table`)
+╭ History — Enter reconnects to that target ───────────────────────────────────────────╮
+│ WHEN             │ACTION     │TARGET        │SERVER   │COUNTRY │ENGINE │RESULT       │
+│ 09-15 00:00:23   │disconnect │—             │—        │—       │cli    │timeout (ups…│
+│ 09-15 00:00:23   │connect    │fastest       │—        │—       │cli    │timeout (ups…│
+
+100x24 with XDG_CACHE_HOME and FPROTON_CACHE_DIR pointed at empty dirs (no serverlist)
+╭ Servers  0/? shown ──────────────────────────────────────────────────────────────────╮
+│ / filter by name, country or city                              f:any  t:any  o:score │
+│ NAME          COUNTRY          CITY             LOAD           SCORE TIER  FEATURES  │
+│ No server index. Press i to build it (fproton index --rebuild)                        │
+│ Proton's server list is missing at /tmp/…/noindex/xdg/Proton/VPN/serverlist.json      │
+(with only FPROTON_CACHE_DIR empty, `servers`/`countries` rebuild the snapshot silently
+ and all three screens render normally — the §4 "stale, not corrupt" rule.)
+
+50x14 (narrow tier: tabs collapse to 1·2·3, hero only)      28x6 (below 30x8)
+1·2·3  Status                                               fproton — terminal too small
+╭ Proton VPN ────────────────────────────────────╮          (need 30x8)
+│ ● Last action failed                           │
+│ CH#461 Switzerland · Zurich                    │
+│ load ████████░░░░ 63%                          │
+│ endpoint  146.70.226.194:443                   │
+╰────────────────────────────────────────────────╯
+widen to 60×16 for the Servers and History tables
+● error CH#461                              ? help
+
+? overlay (88 cols; the same `KEYS` table the key handler dispatches on)
+╭ Keys — any key closes ───────────────────────────────────────────────────╮
+│ q  Ctrl+C               quit (twice while an action runs: cancel, then q…│
+│ Tab  ⇧Tab  1 2 3        Status · Servers · History                       │
+│ Esc                     close this overlay, else cancel the running acti…│
+```
+
+Cancellation, run once deliberately under a bounded deadline (`--timeout 15`, its own
+`FPROTON_STATE_DIR`), because it is the one §7a behaviour no unit test can prove:
+
+```
+c   at 00:10:06.123      hero: "⠙ connect 1s / 15s · Esc to cancel", state badge yellow
+Esc at 00:10:09.138      status line: "● disconnected CH#461 │ tunnel torn down"
+state.json history: [("00:10:09","connect","cancelled",3), ("00:10:09","disconnect","ok",0)]
+pgrep protonvpn after: nothing left from this run
+```
+
+The `connect` child was killed 3 s in, at the keypress — not at its 15 s deadline — so
+StopSignal → CancelToken → SIGTERM of the child group works end to end, and the §7a
+follow-up force disconnect ran and reported. `Ctrl+C` in the same harness exits **130**;
+`q` on a clean session exits **0** (`echo $?` captured from the tmux command).
+
+Not verified, and why: a **successful** connect (RED, §4b — the Proton CLI is wedged on
+the keyring), so the hero's `connected` colouring, the uptime line, the traffic panel with
+real counters and the rx `Sparkline` have only been rendered from `traffic == null` /
+`link.up == false` data. The sparkline's own code path (≥ 2 samples) is therefore unexercised
+on this machine; everything else in §7a has a real frame above or a unit test.
