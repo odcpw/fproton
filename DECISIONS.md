@@ -631,3 +631,53 @@ Not verified, and why:
 - **Notifications.** Default off; `notifications: "on"` was never set, so
   `omarchy-notification-send` has never been called by this widget.
 - **The forwarded-port copy row.** Needs `status.port_forwarding.port`, which needs a tunnel.
+
+## 2026-09-15 — Phase 3 (integrator)
+
+- **clap's own parse errors now go through the §2 error envelope.** `Cli::parse()` let clap
+  print its own text and exit, so `fproton --json servers --feature vpn` answered with
+  unparseable prose — the single most likely failure for an agent, and the one place the
+  documented JSON contract did not hold. `main.rs` now uses `try_parse_from` and renders a
+  `usage` error with a runnable hint. `--help`/`--version` (which clap reports as errors of
+  kind `DisplayHelp`/`DisplayVersion`) still print normally and exit 0.
+- **The hint names the deepest command that was recognised**, so `fproton config set netshield`
+  hints `fproton config set --help`, not `fproton config --help`. `clap_path` walks argv
+  through one level of nesting for the four commands that take subcommands.
+- **A missing subcommand is reported in one line.** clap renders the whole help page for
+  `ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand`; pasting a screenful into the JSON
+  `error` field is useless, so that kind is special-cased to "`fproton config` needs a
+  subcommand" with the same hint.
+- **Global flags get `display_order` 100-105** so that `fproton servers --help` lists the
+  command's own arguments first and the six global ones after, instead of interleaving them.
+  `--yes`, `--dry-run` and `--timeout` now name where they actually bite, because they appear
+  on every subcommand including ones that spawn nothing and mutate nothing.
+- **`build_stage` moved from `phase-1b-core` to `v0.1-integrated`, and `BUILD_NOTE` and the
+  robot-docs BUILD STAGE block were rewritten.** Both still claimed "`tui` and `doctor` are
+  Phase-2 stubs that exit 1", which was false in this build — the machine contract was lying
+  about the two largest components. The replacement text is the §4b matrix in three tiers and
+  claims nothing RED.
+- **`tests/e2e.sh` was silently skipping its §4b RED assertion.** The guard was
+  `if "$BIN" doctor --json >/dev/null 2>&1`, but the doctor exits 11 whenever it finds a
+  failure, which it does on this machine — so the branch that asserts `dns_when_connected`
+  and `tunnel_route_ok` report `skip:link_down` never ran, and the suite reported a green
+  skip instead. It now judges the doctor by whether its output parses, and checks both
+  connected-group checks. This was a passing gate that was not testing what it claimed.
+- **The secrets sweep now includes the doctor** (`--only keyring`, 288 ms; `--only cache`;
+  `doctor capabilities`). It was the one command reading the Secret Service and it was not in
+  the list of commands whose output is grepped.
+- **The keyring-path assertion was wrong, not the doctor.** Adding the doctor made
+  `grep -q "/.local/share/keyrings"` fail on
+  `/home/oliver/.local/share/keyrings/default` — which §2 names as the one sanctioned path
+  (a pointer file holding a keyring basename, never key material). The blunt string ban was
+  replaced by what §2 actually protects: any `keyrings/` path other than `default` fails, and
+  any `*.keyring` FILE fails. Verified non-vacuous by injecting
+  `…/keyrings/Default.keyring` and `…/keyrings/user.keystore` into a copy of the captured
+  output — both are caught, today's real output is clean.
+- **`scripts/check.sh` ran clippy and the test suite twice each**, once for display and once
+  for the exit status, doubling the gate and letting a second run disagree with the output
+  printed from the first. Each now runs once, into a variable.
+- **Accident, recorded:** while probing error paths I ran a real `fproton connect ch`, which
+  is session-touching. It was killed at its 90 s deadline and returned exit 5 as designed, and
+  left the expected 60 s `cli.hang` backoff and a `last_error` in state. Nothing was
+  connected and no NetworkManager profile changed (the e2e "desktop is as it was" check
+  passes). Noted because §1.2 says not to run such commands unbounded, and I did.
