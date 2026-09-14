@@ -31,13 +31,20 @@ The panel says so, and stops polling, when it cannot find the binary.
 ## Developing
 
 A symlinked plugin directory is discovered and loaded, but it does not hot-reload: the
-registry watches with `inotifywait -r`, which does not descend symlinks. After every QML
-edit:
+registry watches with `inotifywait -r`, which does not descend symlinks. **Nor does a
+rescan help** — measured on this machine by appending a deliberate syntax error to
+`Panel.qml`: `rescanPlugins` logged nothing, the widget kept running the old code and
+`tests/plugin-smoke.sh` still passed. The registry's reload is guarded by
+`Qt.clearComponentCache` and does not re-read the QML of an already-loaded symlinked
+plugin. So after every QML edit:
 
 ```bash
-omarchy-shell shell rescanPlugins
+omarchy restart shell                        # the dev loop: this is what re-reads the QML
 journalctl --user -t omarchy-shell -f        # real failures read: Plugin widget <id> failed: …
 ```
+
+`omarchy-shell shell rescanPlugins` is the **cold-load** path — it picks up a plugin
+directory that was not there before. It will not show you an edit to one already loaded.
 
 `omarchy-plugin-validate` refuses any symlink, so validate the repository directory and
 never the installed link:

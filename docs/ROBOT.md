@@ -62,9 +62,11 @@ SAFETY
   them accept --dry-run. The doctor never deletes anything.
 
 WHAT FPROTON NEVER DOES
-  It never reads keyring files, NetworkManager secrets or WireGuard keys; never runs a
-  shell (argv only, everywhere); never contacts Proton's API; and never leaves a child
-  process running past its deadline.
+  It never opens a *.keyring file, NetworkManager secrets or WireGuard keys; never runs
+  a shell (argv only, everywhere); never contacts Proton's API; and never leaves a child
+  process running past its deadline. The one named exception: the doctor's
+  `secret_service_default_alias` fixer rewrites `~/.local/share/keyrings/default`, a
+  16-byte pointer file whose content is a keyring basename, never key material.
 
 TYPICAL SESSION
   fproton status --json

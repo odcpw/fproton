@@ -152,14 +152,21 @@ Item {
   // Only constant literals reach omarchy-launch-*: those scripts end in `eval`
   // or `bash -c` on a joined string (DESIGN §1.5). `wl-copy` and
   // omarchy-notification-send are genuinely argv-shaped.
+  // The one way to set the transient label: §6.4 defines actionStatus as "cleared
+  // 2.2 s after an action exits", and a caller that assigns the property directly
+  // (Panel.qml's warning copy did) leaves the label on screen for ever, because
+  // actionStatusTimer is private to this file.
+  function flash(text) {
+    actionStatus = String(text)
+    actionStatusTimer.restart()
+  }
   function copyPort() {
     var p = portForwarding && portForwarding.port !== null ? portForwarding.port : null
     if (p === null || p === undefined) return
     var n = parseInt(String(p), 10)
     if (!isFinite(n) || n < 1 || n > 65535) return
     Quickshell.execDetached(["wl-copy", "--", String(n)])
-    actionStatus = "Copied port " + n
-    actionStatusTimer.restart()
+    flash("Copied port " + n)
   }
   function openTui() {
     var argv = Model.safeArgv(root.tuiCommand)

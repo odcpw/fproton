@@ -23,6 +23,8 @@ use crate::error::Error;
 const POLL: Duration = Duration::from_millis(25);
 /// Grace between SIGTERM and SIGKILL (§2).
 const GRACE: Duration = Duration::from_secs(2);
+/// How often the wait loop re-checks for the reap once both pipes are at EOF.
+const REAP_POLL: Duration = Duration::from_millis(2);
 /// How long we keep draining the pipes *after* the child has been reaped.
 /// A descendant that left the process group (`setsid`, a daemonising helper) still
 /// holds the inherited write end, so the pipes may never reach EOF. Reading is
@@ -153,7 +155,13 @@ impl Pipes {
     /// Read whatever is ready, waiting at most `wait`. Doubles as the wait loop's sleep.
     fn pump(&mut self, wait: Duration) {
         if self.done() {
-            std::thread::sleep(wait);
+            // Both pipes are closed, so the child has already closed its stdio and is
+            // on its way out: all that is left is to notice the reap. Sleeping the
+            // full `wait` here costs a whole POLL period on every single spawn (it
+            // put ~20 ms back onto `status`, whose budget is 50 ms), so poll for the
+            // exit at a much finer grain. The cost when a child closes its stdio and
+            // then lives on is a 2 ms wakeup, which is nothing.
+            std::thread::sleep(wait.min(REAP_POLL));
             return;
         }
         let mut fds = [

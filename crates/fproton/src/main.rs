@@ -82,7 +82,11 @@ enum Cmd {
   CC            a country, e.g. CH
   CC#N          one server, e.g. CH#461
   city:NAME     e.g. city:\"New York\"
-  p2p | secure-core | tor | random")]
+  p2p | secure-core | tor | random
+
+UNVERIFIED on the build machine: the Proton CLI is wedged there, so a SUCCESSFUL
+connect has never been observed. Only the deadline and error paths are tested.
+See `fproton capabilities` (build_note).")]
     Connect {
         /// fastest | CC | CC#N | city:NAME | p2p | secure-core | tor | random
         target: Option<String>,
@@ -159,6 +163,12 @@ server list from disk and filters it locally."
         cmd: Option<SettingsCmd>,
     },
     /// One-shot NAT-PMP port-forwarding request through the tunnel
+    #[command(
+        after_help = "Requests UDP only; the reference port.py also retries with the TCP
+opcode. UNVERIFIED on the build machine: no tunnel can be brought up there, so a
+SUCCESSFUL request has never been observed — only the no-tunnel error path (exit 6).
+See `fproton capabilities` (build_note)."
+    )]
     Port,
     /// Past connect/disconnect actions
     History {

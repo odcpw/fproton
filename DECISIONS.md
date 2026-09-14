@@ -691,3 +691,144 @@ Not verified, and why:
   `fproton servers` when there is no safe prefix at all. `Error::Ambiguous`'s default hint
   lost its `<text>` the same way. A test asserts no hint for `; rm -rf`, `$(id)`, `` `id` ``,
   `a|b`, `--` or `&& reboot` contains a shell metacharacter.
+
+## 2026-09-15 — Phase 4 (fixer)
+
+- **correction** · the Phase-1b §4b matrix row for `dns_when_connected`/`tunnel_route_ok`
+  cited an e2e `skip` that never ran: the guard short-circuited on the stub doctor's exit 1
+  (see the Phase-3 entry above), and a Phase-1b stub doctor emitted no checks at all. That
+  assertion first ran, and passed, at the Phase-3 gate; it passes here too.
+- **`run_with_deadline` handed its deadline to whatever held the pipe.** The two drain
+  threads were `join`ed after the group kill, so a descendant that had left the process
+  group (`setsid`, a daemonising helper) kept the inherited write end open, the pipe never
+  reached EOF, and the call blocked for ever — DESIGN §2's first invariant. Reproduced with
+  a fake `protonvpn` running `setsid sleep 40 & sleep 40`: `fproton account --timeout 3` ran
+  the full 20 s and had to be killed from outside (exit 124). Reading now happens inside the
+  wait loop through `poll(2)` on non-blocking fds, with a 200 ms bounded drain after the
+  reap; the same case now returns in 3.2 s with exit 5. Regression test:
+  `a_descendant_outside_the_process_group_cannot_defeat_the_deadline`.
+- **The poll rewrite cost `status` 20 ms until `REAP_POLL` was added.** Once both pipes hit
+  EOF the pump had nothing to poll and slept the full 25 ms `POLL` waiting for the reap —
+  reintroducing the old code's granularity *after* paying for the poll. Measured, 40 runs
+  interleaved against the pre-fix binary: `status --json` 53.2 ms vs 34.8 ms. With a 2 ms
+  `REAP_POLL` once EOF is reached it is **26.2 ms against 30.9 ms pre-fix** — faster than
+  before the fix, and inside the §2 budget.
+- **`state::update` holds an advisory `flock` across the read and the write**, and `status`
+  commits only the five fields it owns through it instead of saving the snapshot it loaded
+  before the probes. Atomic rename alone did not stop two writers from reverting each other:
+  a `pending` record, a history row or a recents entry written during the tens of
+  milliseconds of probing was silently rolled back. The regression test
+  (`concurrent_updates_do_not_revert_each_other`, 4 threads × 20 pushes) fails without the
+  lock and passes with it — verified both ways.
+- **SIGINT now cancels rather than kills.** The handler stores a signal number; a watcher
+  thread turns that into `CancelToken::cancel`, and re-raises with the default disposition
+  3 s later so fproton can never become unkillable. Before: Ctrl+C during a connect left the
+  child alive (its own process group never saw the terminal's SIGINT) and `pending` behind.
+  Verified with a fake CLI: exit 130 through the JSON envelope, no orphan, `pending` cleared,
+  and a `cancelled` history row.
+- **`signin` refuses without a TTY** (exit 2, hint
+  `omarchy-launch-floating-terminal-with-presentation fproton signin`). §2 grants it the only
+  deadline-free spawn *because* it is "interactive, only from a terminal"; nothing enforced
+  that, so from a script it hung for ever and wrote the child's password prompt into the
+  stdout that is implied `--json`.
+- **The menu merge put its comma inside a comment.** `merge_menu` appended the separating
+  comma after `head.trim_end()` — the last non-blank line, which in a commented JSONC file is
+  very often a `//` line. Reproduced in a sandbox menu file; the merged file no longer
+  parsed. Both the insertion point and the comma now skip the trailing comment run, and
+  `rfind('}')` ignores a brace inside a comment.
+- **`fn diff()` could not show a removal**, so the one line the merge rewrites (the previous
+  last entry, which gains a comma) rendered as a pure addition — reading as a duplicate of
+  the owner's own entry in the only preview of the only user-owned file fproton writes. It
+  now emits `-` lines too, and README:70 and the covering test were renamed and reworded to
+  say what actually happens.
+- **`parse_config_list` panicked on non-ASCII upstream output.** `str::split_at` at a byte
+  column taken from the rule line aborts the process when the index lands inside a character:
+  exit 101, no envelope, no §4a code. Reproduced with a fake CLI whose `ipv6` row put `ü`
+  across the boundary. The cut walks back to a char boundary, with the §8 "run of two spaces"
+  rule as a fallback.
+- **`connect --wait` was parsed, documented and ignored**, which made §4a's exit 8
+  unreachable from any command. It now polls `nm::link_state` until `proton0` is up or the
+  connect deadline passes. Verified with a fake CLI that exits 0 without bringing anything
+  up: `connect CH --wait --timeout 4` → exit 8, `code_name: timeout`, 4 s.
+- **The doctor's write-scope guard was one-sided and `..`-blind.** `Path::starts_with`
+  compares components without resolving `..`, and `undo` checked nothing at all. `in_scope`
+  now rejects any `..`, the backup/quarantine path mapping refuses one, and
+  `restore_file`/`quarantine`/`remove_symlink` are behind the same guard, so undo's blast
+  radius equals apply's.
+- **The doctor journalled after it mutated**, contradicting its own refusal text ("a mutation
+  must be recorded before it is applied"). `write_file` now fsyncs an `ok:false` intent line
+  before the rename and an `ok:true` completion line after; `undo` reports an intent with no
+  completion as "unknown — the run stopped between the journal entry and the write", naming
+  the backup, rather than skipping it in silence.
+- **`ClearPending` rebuilt state.json from the probe copy**, captured seconds earlier —
+  `cli_session_probe` alone spends 8 s (measured again today: killed at its deadline after
+  8014 ms) — so anything written in between was rolled back. It re-reads the file now.
+- **The index scratch directory left `/tmp`.** It was `fproton-doctor-index.<pid>.<now>`,
+  fully predictable and world-writable, created with `create_dir_all` (which happily reuses
+  someone else's directory) and read back into the real server index. It now lives under
+  fproton's own cache dir and is created with `create_dir`, so a pre-existing directory is a
+  refusal.
+- **The "no shell strings in argv" gate could not match the argv it bans.** The pattern
+  required the comma to follow `bash` directly, leaving no room for the closing quote, so
+  `["bash", "-c", …]` and `["sh", "-c", …]` both passed while the step printed "no sh -c, no
+  bash -c, anywhere in the Rust sources". Verified vacuous against a two-line probe file
+  (`grep rc=1`), fixed, and the step now proves itself against 3 known violations on every
+  run before it is believed.
+- **TUI:** the 60-99 column Status branch dropped the whole Warnings panel, so at 80x24 —
+  a default terminal — `conflicting_tunnel` was invisible; it is back, with the fixed slots
+  shrinking on a 24-row terminal rather than any panel vanishing, and warnings ordered
+  most-severe-first so the row that gets cut is never the error or the warn. Verified in a
+  real 80x24 tmux pane. The §7a index empty state was gated on the substring "index" while
+  the core's message is "Proton's server list is missing at …", so "Press i to build it"
+  never appeared on a real install — `servers_err` now carries `(code_name, text, hint)`.
+  The CLI hang breaker is a persistent row as well as a refusal, from one shared string.
+  `Esc` with nothing running says so. Quitting with `q q` during a connect no longer drops
+  §7a's follow-up `disconnect --force`: the debt is settled in `tui::run` after the runtime
+  has torn the child group down, so the teardown cannot race the connect it cleans up.
+- **Plugin:** `activateWarning` set `svc.actionStatus` directly, so "Copied: <hint>" never
+  expired (§6.4 says 2.2 s); `Service.flash()` is now the only way to set that label. The
+  panel opened with Protections and the whole footer below the fold behind a QQC2
+  `AsNeeded` scrollbar, which is invisible until you scroll: the country list is capped at 4
+  while the filter is closed (8 once it is open) and the scrollbar is `AlwaysOn` whenever
+  there is anything below the fold.
+- **`natpmp` claimed a TCP request it never makes.** `request_port` only ever sends the UDP
+  opcode; the doc comment said UDP and TCP were requested separately. v0.1 stays UDP-only —
+  adding an untestable fallback on a path that is §4b RED would be a claim we cannot stand
+  behind — and the comment, `port --help` and this entry say so instead.
+- **`--help` for `connect` and `port` now carries the RED disclosure** that `capabilities`,
+  README and `robot-docs` already carried. An agent that reads only `--help` was told nothing.
+- **`agent.rs`'s "never" claim was absolute and wrong.** "It never reads keyring files"
+  contradicts the doctor's Class C fixer, which rewrites `~/.local/share/keyrings/default`.
+  Both the `capabilities` key and the `ROBOT_GUIDE` paragraph now mirror README's wording;
+  `docs/ROBOT.md` was regenerated.
+- **Accident, recorded:** a first cut of the `reconnect` regression test called
+  `engine::reconnect` with an empty cache dir, where `resolve` degrades to `Ok(())` — so it
+  spawned a real `protonvpn connect`, which ran to its 90 s deadline and returned exit 5.
+  Nothing connected (`proton0` absent, no `ProtonVPN` profile active, checked immediately
+  after), and the e2e "the desktop is as it was" check passes. §1.2 says not to run such
+  commands, and I did. The test now points the index at `tests/fixtures/serverlist-small.json`
+  and asserts `resolve` fails *before* calling `reconnect`, so it cannot spawn anything.
+
+### §4b verification matrix (v0.1-integrated), re-filled from this run
+
+| Command | Class | How verified today | Evidence | Claimed in README? |
+|---|---|---|---|---|
+| `status` | GREEN | `tests/e2e.sh --full` | `status --json` exit 0, every §5 key, schema 1; mean **24.5 ms** over 20 runs (§2 budget 50 ms) | yes |
+| `servers`/`countries`/`cities`/`index` | GREEN | e2e | `servers --country CH --json` mean **7.8 ms** (budget 20 ms); 18 221 servers, 149 countries | yes |
+| `settings`/`history`/`recents`/`version` | GREEN | e2e | exit 0, valid envelopes | yes |
+| `capabilities`/`robot-docs` | GREEN | e2e | `build_stage = v0.1-integrated`, 23 commands, 15 exit codes | yes |
+| `setup --dry-run` | GREEN | e2e | exit 0 in 170 ms; `.dry_run = true`; the owner's `omarchy-menu.jsonc` byte-identical afterwards | yes |
+| `tui` | GREEN | real tmux panes, 80x24 and 120x40, plus 28 unit tests | Status renders hero, Traffic, Protections, **Warnings** and Recents at both sizes; `q` quits cleanly | yes |
+| `doctor` | GREEN | `fproton doctor --json` on this machine | 26 checks: 18 pass, 4 warn, 2 fail, 2 skip; `secret_service_default_alias` = `fail:phantom_collection` as §1.2 predicts | yes |
+| `disconnect --force` | GREEN | e2e | no-op while both profiles are inactive; the active-connection set is unchanged after the suite | yes |
+| `port` (no tunnel) | GREEN | e2e | exit 6 `not_found` | error path only |
+| `signin` (validation) | GREEN | unit tests + a non-TTY run | a bad username is exit 2; **no TTY is now exit 2**, not a hang | yes |
+| `connect`, `reconnect`, `disconnect`, `config list\|get\|set`, `account`, `signout` | AMBER | e2e `--full`, own state dir, `--timeout 3` | each exit 5 `upstream` in 3.03-3.11 s with a runnable hint; `account` at the un-overridden 15 s probe deadline exits 5 after 15 044 ms; the second call in the same state dir exits 5 in **11 ms** on the backoff | deadline path only |
+| `connect`/`reconnect` **success**, `port` **success**, `wg *` | RED | not verifiable: the Proton CLI is wedged (§1.2) | — | never; `--help` now says so for `connect` and `port` too |
+| doctor `dns_when_connected`, `tunnel_route_ok` | RED | e2e asserts the skip | both report `skip`: "proton0 does not exist; this check needs a live tunnel and has never run" | never |
+
+Gate for this pass: `scripts/check.sh --full` → fmt clean, clippy clean, **149 unit tests**,
+core-is-silent clean, the argv gate non-vacuous (3/3), `tests/e2e.sh --full` **96 passed, 0
+failed, 0 skipped**, `tests/plugin-smoke.sh` **20 passed, 0 failed**. The one real
+`scripts/install.sh --yes` run, and therefore the `~/.local/bin/fproton` staleness the
+honesty reviewer found, belongs to the Phase-4 verifier and was deliberately not done here.

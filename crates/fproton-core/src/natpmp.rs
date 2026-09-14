@@ -41,7 +41,11 @@ pub struct PortMapping {
     pub expires_at: String,
     pub lifetime_sec: u32,
     pub gateway: String,
-    /// `udp` and `tcp` are requested separately; Proton grants the same port for both.
+    /// Always `"udp"` in v0.1: [`request_port`] sends only the UDP opcode. The
+    /// reference `port.py` (§1.3) asks for UDP, then TCP, and takes whichever answers
+    /// — that fallback is deliberately not implemented here, because a successful
+    /// request is §4b RED on this machine and an untested fallback path would be a
+    /// claim we cannot stand behind. `port --help` says so too.
     pub protocol: String,
 }
 
@@ -136,6 +140,8 @@ pub fn request_port(ctx: &Context, cancel: &CancelToken) -> Result<PortMapping, 
         .connect((GATEWAY, PORT))
         .map_err(|e| Error::backend(format!("cannot reach {GATEWAY}:{PORT}: {e}")))?;
 
+    // UDP only (see `PortMapping::protocol`): port.py also retries with the TCP
+    // opcode, which v0.1 does not, because neither path can be verified here.
     let request = encode_request(OP_MAP_UDP, 0, 0, LIFETIME_SEC);
     let mut wait = FIRST_RETRY;
     let mut last: Option<String> = None;

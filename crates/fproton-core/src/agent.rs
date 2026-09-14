@@ -87,7 +87,7 @@ pub fn capabilities_json(ctx: &Context) -> serde_json::Value {
             "bare_invocation": "on a TTY opens the TUI; without one prints `status --json`",
             "destructive": "`disconnect --force`, `wg swap`, `setup --disable-old-plugin` and `doctor --fix` need --yes; all offer --dry-run",
             "deadlines": "every external command runs in its own process group with a deadline; --timeout <s> clamps all of them",
-            "never": "fproton never reads keyring files, NetworkManager secrets or WireGuard keys, and never contacts Proton's API",
+            "never": "fproton never opens a *.keyring file, NetworkManager secrets or WireGuard keys, and never contacts Proton's API; the one file it may rewrite under keyrings/ is the `default` pointer, whose content is a keyring basename",
         },
         "connect_targets": TARGET_FORMS,
         "status_schema": SCHEMA_VERSION,
@@ -186,9 +186,11 @@ SAFETY
   them accept --dry-run. The doctor never deletes anything.
 
 WHAT FPROTON NEVER DOES
-  It never reads keyring files, NetworkManager secrets or WireGuard keys; never runs a
-  shell (argv only, everywhere); never contacts Proton's API; and never leaves a child
-  process running past its deadline.
+  It never opens a *.keyring file, NetworkManager secrets or WireGuard keys; never runs
+  a shell (argv only, everywhere); never contacts Proton's API; and never leaves a child
+  process running past its deadline. The one named exception: the doctor's
+  `secret_service_default_alias` fixer rewrites `~/.local/share/keyrings/default`, a
+  16-byte pointer file whose content is a keyring basename, never key material.
 
 TYPICAL SESSION
   fproton status --json

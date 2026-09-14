@@ -63,7 +63,13 @@ Panel {
 
   // 149 countries is more than a panel should draw, so the list is alphabetical
   // (where a name can be predicted) and capped; `/` narrows it.
-  readonly property int countryLimit: 8
+  //
+  // Four while the filter is closed, eight once the user is actually looking for a
+  // country: on first open the eight rows pushed Protections and the whole footer
+  // (Open TUI · Doctor · Sign in/Sign out) below the fold of a panel capped at
+  // Style.space(560), with the QQC2 default scrollbar — transparent until you
+  // scroll — giving no hint that anything was down there.
+  readonly property int countryLimit: countryFilterOpen ? 8 : 4
   readonly property var countriesSorted: {
     var list = []
     for (var i = 0; i < svc.countries.length; i++) {
@@ -188,7 +194,7 @@ Panel {
     if (hint === "") return
     if (hint.indexOf("fproton doctor") === 0) { svc.openDoctor(); root.close(); return }
     Quickshell.execDetached(["wl-copy", "--", hint])
-    svc.actionStatus = "Copied: " + hint
+    svc.flash("Copied: " + hint)
   }
 
   readonly property var netshieldValues: ["off", "malware-only", "malware-ads-trackers"]
@@ -408,7 +414,13 @@ Panel {
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        // AsNeeded is the QQC2 default: transparent until the user scrolls, which is
+        // no affordance at all for content they do not know exists. Shown whenever
+        // there is something below the fold (the same idiom as Ui/…/audio/Panel.qml).
+        ScrollBar.vertical: ScrollBar {
+          policy: panelFlick.contentHeight > panelFlick.height
+                  ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+        }
 
         Column {
           id: column

@@ -67,8 +67,9 @@ fproton setup --menu                  # adds the protonvpn.* entries to the Omar
 
 The Omarchy shell's PATH includes `~/.local/bin` but not `~/.cargo/bin`, so install there.
 Menu entries land in `~/.config/omarchy/extensions/omarchy-menu.jsonc` under `protonvpn.*`;
-`setup --menu` inserts whole lines before the file's final `}` and never rewrites the
-comments or entries already in it.
+`setup --menu` inserts whole lines before the file's final `}`, changing at most the
+trailing comma of the entry that was previously last; comments and every other line are
+untouched, and `--dry-run` shows that one rewrite as a paired `-`/`+`.
 
 ## CLI
 
@@ -139,7 +140,9 @@ in this README, in `--help`, or in `robot-docs`.
 
 `fproton capabilities` carries `build_stage` and `build_note` for the build you actually
 have; read those before trusting anything above. The matrix with the evidence for each row
-lives in `DECISIONS.md`.
+is the "§4b verification matrix (v0.1-integrated)" section at the end of `DECISIONS.md` —
+the earlier Phase-1b matrix in that file describes a build in which `tui` and `doctor` were
+still stubs, and is kept only because the log is append-only.
 
 ## The widget
 
