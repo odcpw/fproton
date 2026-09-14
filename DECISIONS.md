@@ -681,3 +681,13 @@ Not verified, and why:
   left the expected 60 s `cli.hang` backoff and a `last_error` in state. Nothing was
   connected and no NetworkManager profile changed (the e2e "desktop is as it was" check
   passes). Noted because §1.2 says not to run such commands unbounded, and I did.
+- **`<text>` is not a runnable command.** A 21-case corpus of wrong invocations found one
+  hint that could not be run: `fproton servers --search <text>`, produced by
+  `shell_safe_hint` whenever a rejected value contained anything shell-shaped. The intent
+  (never paste an unsanitised value into a hint) was right; the result violated §2's "hint:
+  `<runnable command>`". `search_hint` now keeps the value's *leading* safe run —
+  `CH#461 foo` hints `--search CH`, which is both runnable and finds what the caller meant,
+  and stops at the `#` that would comment out a pasted line — and falls back to bare
+  `fproton servers` when there is no safe prefix at all. `Error::Ambiguous`'s default hint
+  lost its `<text>` the same way. A test asserts no hint for `; rm -rf`, `$(id)`, `` `id` ``,
+  `a|b`, `--` or `&& reboot` contains a shell metacharacter.

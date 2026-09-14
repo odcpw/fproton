@@ -216,7 +216,7 @@ impl Error {
             Error::Backend { .. } => "fproton doctor",
             Error::Upstream { .. } => "fproton doctor",
             Error::NotFound { .. } => "fproton countries",
-            Error::Ambiguous { .. } => "fproton servers --search <text>",
+            Error::Ambiguous { .. } => "fproton servers",
             Error::Timeout { .. } => "fproton status --json",
             Error::NotSignedIn { .. } => "fproton signin",
             Error::Index { .. } => "fproton index --rebuild",

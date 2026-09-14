@@ -127,20 +127,27 @@ impl FromStr for Target {
             "'{s}' is not a connect target; use one of: {}",
             TARGET_FORMS.join(" · ")
         ))
-        .with_hint(format!("fproton servers --search {}", shell_safe_hint(s))))
+        .with_hint(search_hint(s)))
     }
 }
 
-/// Keep a rejected value out of the hint when it contains anything shell-shaped.
-/// The hint is printed, never executed, but it must stay copy-pasteable and honest.
-fn shell_safe_hint(s: &str) -> String {
-    if s.chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        && !s.is_empty()
-    {
-        s.to_string()
+/// A search hint for a rejected value that is always a command you can actually run.
+///
+/// Two rules pull against each other: §2 says every hint is a runnable command, and a
+/// rejected value must not be pasted into one when it is shell-shaped. Keeping the
+/// value's leading safe run satisfies both — `CH#461 foo` hints `--search CH`, which
+/// is runnable *and* finds what the caller meant — and a value with no safe prefix at
+/// all falls back to bare `fproton servers`. A `<text>` placeholder is not a command.
+pub(crate) fn search_hint(s: &str) -> String {
+    let safe: String = s
+        .trim()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if safe.is_empty() {
+        "fproton servers".to_string()
     } else {
-        "<text>".to_string()
+        format!("fproton servers --search {safe}")
     }
 }
 
@@ -196,7 +203,7 @@ pub fn target_for_server(name: &str) -> Result<Target, Error> {
     } else {
         Err(
             Error::not_found(format!("'{name}' is not a Proton server name"))
-                .with_hint("fproton servers --search <text>"),
+                .with_hint(search_hint(name)),
         )
     }
 }
@@ -235,7 +242,7 @@ fn resolve(ctx: &Context, target: &Target) -> Result<(), Error> {
                 }
                 return Err(
                     Error::not_found(format!("no Proton server is called '{name}'"))
-                        .with_hint(format!("fproton servers --search {name}")),
+                        .with_hint(search_hint(name)),
                 );
             };
             if let Some(max) = max_tier {
@@ -623,7 +630,22 @@ mod tests {
         }
         let e = "; rm -rf".parse::<Target>().unwrap_err();
         assert_eq!(e.exit_code(), 2);
-        assert_eq!(e.hint(), "fproton servers --search <text>");
+        // §2: the hint is a runnable command, and a shell-shaped value never reaches it.
+        assert_eq!(e.hint(), "fproton servers");
+        // A value with a safe prefix keeps it, so the hint actually finds what was meant,
+        // and stops at the first character that is not (here `#`, which would comment out
+        // the rest of the line if the hint were pasted into a shell).
+        assert_eq!(
+            "CH#461 foo".parse::<Target>().unwrap_err().hint(),
+            "fproton servers --search CH"
+        );
+        for shell_shaped in ["; rm -rf", "$(id)", "`id`", "a|b", "--", "&& reboot"] {
+            let hint = shell_shaped.parse::<Target>().unwrap_err().hint();
+            assert!(
+                !hint.contains(['$', '`', ';', '|', '&', '(', ')', '#']),
+                "hint for {shell_shaped:?} leaked a shell metacharacter: {hint}"
+            );
+        }
     }
 
     #[test]
