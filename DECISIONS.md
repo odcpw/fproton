@@ -188,3 +188,117 @@ Not verified at this gate, and why: no timing numbers (`status` and `servers` do
 - 2026-09-14 · docs · `scripts/install.sh` installs by writing `$PREFIX/.fproton.install.$$` and `mv`-ing it into place: `install`/`cp` over a running `fproton` (a TUI in another window) gives ETXTBSY, and a half-copied binary on PATH is worse than none. It also takes an mkdir lock under `$XDG_RUNTIME_DIR`, skips the copy when `cmp` says the built binary is already installed, and refuses without `--yes` when stdin is not a terminal with exit 3 — the same `safety` code fproton itself uses (0/1/2/3/4 reused throughout).
 - 2026-09-14 · docs · `scripts/uninstall.sh` leaves `~/.config/omarchy/extensions/omarchy-menu.jsonc` alone unless `--menu` is passed. With it: verbatim backup to `~/.local/state/fproton/backups/`, whole-line removal by awk (the lone `// fproton` marker and every `"protonvpn…"` key), then one trailing comma repaired on the last remaining entry, then a parse check (a python JSONC comment-stripper); a result that does not parse is restored from the backup and the script exits 1. Verified on a copy of the owner's real menu file with the fproton block inserted the way `setup --menu` will insert it: the stripped file is byte-identical to the pre-insert original (`cmp` clean), and a second run is a no-op.
 - 2026-09-14 · docs · Numbers measured for the README rather than copied from DESIGN: `timeout 8 protonvpn --help` = 428/356/332 ms (three runs, exit 0); the read-only `busctl … SearchItems … service Proton` probe = 19/11/11 ms (exit 0). `shellcheck` and `shfmt` are not installed on this machine (`which` fails), so the script gate is `bash -n` plus real `--dry-run` runs; an integrator with shellcheck should re-run it.
+
+- 2026-09-14 · phase-1b · `state.json` is the single state file, written atomically (`state.json.tmp.<pid>` + `rename(2)`); an unreadable or unparsable file degrades to an empty state rather than failing `status`, because everything in it is a cache. History is capped at 200 entries, recents at 10.
+- 2026-09-14 · phase-1b · `StateFile` gained four additive `#[serde(default)]` fields Phase 1a had not foreseen: `account` (§5 `account` has to be cached somewhere), `last_error` (§5 says any new action clears it, so it must persist between invocations), and `link_uuid` + `link_up_since`. **Integrator:** these are additions to a frozen struct, not changes — old files still load. `link.since`/`uptime_sec` are "since fproton first observed this profile up": nmcli's terse listing carries no start time, and sysfs directory mtimes are not creation times on this box (verified: `/sys/class/net/lo` mtime was 1 h old on a 2-day uptime).
+- 2026-09-14 · phase-1b · `status.pending.pid` is always `null`. `proc::run_with_deadline` only reports the child pid after the child is reaped, and §5 allows `pid: int|null`; a guessed pid would be worse than none. Consumers derive progress from `elapsed_sec`/`deadline_sec`, which is what §5 §7a §6.6 actually use.
+- 2026-09-14 · phase-1b · `INDEX_FORMAT_VERSION` bumped 1 → 2. The snapshot is now five postcard documents back to back — header, meta, countries, cities, servers — with the small blocks first, so `countries`/`cities` never decode the 18 221-row server block and `status` reads only the first 4 KiB. The §4 header contract is unchanged; the new `IndexMeta` block carries `ExpirationTime`/`LoadsExpirationTime`, which `status` needs and the frozen header has no field for. (The alternative, re-reading the 24 MB source in `status`, is forbidden by the 50 ms budget; Proton writes those two keys at the *end* of the file, so a cheap head-read is not possible either.)
+- 2026-09-14 · phase-1b · Servers are stored without their derived fields (`features`, `country_name`) and are decoded **borrowing** from the file's bytes (`StoredServerRef<'a>` with `&str`); only matching rows become owned `ServerRow`s. That took `servers --country CH --json` from 34.6 ms to ~20 ms. `find_server` decodes row by row and stops at the first match.
+- 2026-09-14 · phase-1b · `country_name` comes from a 251-entry table generated from `/usr/share/iso-codes/json/iso_3166-1.json` (iso-codes 4.19) and compiled in, plus the two codes Proton ships that ISO does not assign: `UK` (United Kingdom) and `XK` (Kosovo). Verified against the real 18 221-server list: those are the only two of 149 exit countries outside ISO 3166-1.
+- 2026-09-14 · phase-1b · A country's (or city's) `lat`/`lon` is the location of its **least-loaded** server — one real point, never an average of several, which would put "Switzerland" in a lake.
+- 2026-09-14 · phase-1b · `status` runs its three external probes on threads (`nmcli`, `systemctl is-active`, `busctl`) plus a fourth that reads the persistence file and joins the index, so the wall clock is the slowest probe rather than their sum. The single `nmcli -t … connection show` is the dominant cost (27.5 ms standalone under load average 3).
+- 2026-09-14 · phase-1b · `status.ok` is `true` whenever the document was produced from real measurements, even when `state` is `error`: `ok` reports whether the *command* succeeded, not whether the VPN is healthy. It is `false` only when the nmcli probe itself failed, and then the failure is in `last_error`. (Phase 1a's `ok:false` meant "this build cannot answer", which no longer applies.)
+- 2026-09-14 · phase-1b · A failed `protonvpn` call records `status.last_error` from `cli.rs`, so the panel and the TUI can say "the CLI did not answer" without an engine action having run. Consequence, straight out of the §5 truth table: after a failed probe with the link down and no pending action, `status.state` is `error` until the next action clears it. That is the table, not a bug.
+- 2026-09-14 · phase-1b · Plain `disconnect` always calls the Proton CLI; only `disconnect --force` is the idempotent nmcli no-op (§4b lists them in different classes: `--force` is GREEN and must stay a no-op while both profiles are inactive, plain `disconnect` is AMBER and must reach its deadline). nmcli's "not an active connection" / "Device not found" wording is treated as success there.
+- 2026-09-14 · phase-1b · `--no-color` is a `main.rs` flag, but `setup`, `doctor` and the TUI build their own `Out` from a `Context`, which does not carry it. `output.rs` records the flag in a process-global the first time `Out::new` runs (always in `main`), so every later `Out` honours it. **Integrator:** the tidier fix is a `no_color` field on `Context`, which is frozen.
+- 2026-09-14 · phase-1b · `setup` without `--yes` is a dry run that says so, rather than a refusal: every step is reported with `changed` / `already` / `would` / `skipped` / `failed`, so a second run is visibly a no-op (`doctor`'s `menu_entries` check asserts the same thing). `--menu` appends a comma to the user's previous last entry when it needs one, which is the only byte it ever changes outside its own inserted block; the unified diff in `--dry-run` shows that line.
+- 2026-09-14 · phase-1b · `wg.rs` is 265 lines of module body (301 with tests) against the ≤ 200 the design budgeted. The overrun is the `peer_of` lookup: the index stores no public keys, so `swap` re-reads Proton's 24 MB list to find the target's `EntryIP` + `X25519PublicKey`. `wg list` was run live and lists the real `ProtonVPN CH#461` profile with endpoint `146.70.226.194:443`; `wg up` and `wg swap` have **never** been executed (RED).
+- 2026-09-14 · phase-1b · No `hyperfine` and no `/usr/bin/time` exist on this machine (both checked), and installing a package to measure was not worth a system change. Timings below are a 20-iteration bash loop around `date +%s%N`, whose own floor is 2.5 ms (measured with `true`); subtract that for the process's own time.
+- 2026-09-14 · phase-1b · The "secrets" test is `tests/e2e.sh`, not a unit test: it runs every safe command with `--json` and with `-v`, concatenates stdout+stderr, and greps for `PrivateKey`, `RefreshToken`, `AccessToken`, `x25519pk`, `X25519PublicKey`, any 44-character base64 blob ending in `=`, and any `~/.local/share/keyrings` path. A real binary running real commands is stronger evidence than a unit test over a struct. `status.rs` additionally asserts the same patterns against the serialised document, including Proton's 88-character `server_id`.
+
+## Phase 1b gate (2026-09-14, real output)
+
+```
+$ cargo build --release
+    Finished `release` profile [optimized] target(s) in 17.01s      (binary 2 447 016 B)
+
+$ cargo test
+running 6 tests    test result: ok. 6 passed; 0 failed        (crates/fproton)
+running 83 tests   test result: ok. 83 passed; 0 failed       (crates/fproton-core)
+
+$ cargo clippy --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.17s   (no warnings)
+
+$ cargo fmt --check
+                                                                         (no diff)
+
+$ grep -rnE 'println!|eprintln!|print!|dbg!' crates/fproton-core/src | wc -l
+0                                              # "core is silent" still holds
+
+$ scripts/check.sh --full
+    …
+    84 passed, 0 failed, 1 skipped (full)      # tests/e2e.sh --full, 42.5 s
+    ==> tests/plugin-smoke.sh
+        skipped: tests/plugin-smoke.sh does not exist yet (Phase 2, the plugin agent)
+    check.sh: everything green (full)
+
+$ fproton status --json | jq -c '{ok,schema,state,signed_in,max_tier,server:.server.name,load:.server.load,endpoint:.link.endpoint,index:.index.servers,warnings:[.warnings[].id],commands}'
+{"ok":true,"schema":1,"state":"disconnected","signed_in":true,"max_tier":2,"server":"CH#461",
+ "load":63,"endpoint":"146.70.226.194:443","index":18221,
+ "warnings":["serverlist_stale","protections_unknown","conflicting_tunnel"],
+ "commands":["fproton connect fastest","fproton index --rebuild"]}
+  (every §5 key present; `signed_in` is the live busctl SearchItems answer, `max_tier` and the
+   CH#461 row come from the real 18 221-server snapshot, the endpoint from connection_persistence.json
+   matched by NM UUID 58d6042d-…)
+
+$ fproton capabilities | jq -c '{build_stage,commands:(.commands|length),index_format_version}'
+{"build_stage":"phase-1b-core","commands":23,"index_format_version":2}
+
+$ fproton robot-docs | head -3
+fproton — agent handbook
+========================
+(blank)
+
+$ fproton index --rebuild --json
+{"index":{"built_at":"…","bytes":1478660,"cities":195,"countries":149,"duration_ms":64,
+ "max_tier":2,"path":"/home/oliver/.cache/fproton/index.bin","rebuilt":true,"servers":18221,
+ "source_len":24432460,"source_mtime":"2026-09-14T20:26:43+02:00", …},"ok":true,"schema":1}
+  (24 432 460 B of JSON → a 1 478 660 B snapshot in 64 ms)
+```
+
+Timing method: no `hyperfine`, no `/usr/bin/time` on this machine; a 20-iteration bash loop
+around `date +%s%N`, floor measured at 2.5 ms with `true`. Load average was ~3.0 throughout
+(other agents were compiling), so these are pessimistic.
+
+| Measurement | n | mean | min | max | budget |
+|---|---|---|---|---|---|
+| `fproton status --json` | 20 | **37.1 ms** | 31.3 | 66.1 | < 50 ms — met |
+| `fproton servers --country CH --json` (≈100 rows) | 20 | **20.4 ms** (17.9 net) | 17.2 | 24.3 | < 20 ms — met only after subtracting the 2.5 ms measurement floor; recorded as a marginal miss on the raw number |
+| `fproton servers --country CH --limit 10 --json` | 20 | 14.8 ms | 10.9 | 16.8 | — |
+| `fproton countries --json` | 20 | 8.0 ms | 6.5 | 9.5 | — |
+| `nmcli -t -f NAME,UUID,TYPE,DEVICE,ACTIVE connection show` alone | 20 | 27.5 ms | 24.4 | 30.6 | — (the floor under `status`) |
+| bash measurement loop floor (`true`) | 20 | 2.5 ms | 1.9 | 3.1 | — |
+| `fproton index --rebuild` (24 MB → snapshot) | 1 | 64-85 ms | — | — | — |
+
+### §4b verification matrix, filled from this run
+
+| command | class | how verified today | evidence (exact command + first line of real output) | claimed in README? |
+|---|---|---|---|---|
+| `status` | GREEN | real run, every §5 key asserted, 10-run timing | `fproton status --json` → `{"ok":true,…,"state":"disconnected","server":{"name":"CH#461","load":63,…}}` | yes |
+| `servers` | GREEN | real run over the 18 221-row snapshot; country/tier/feature filters asserted | `fproton servers --country CH --json` → `{"built_from_mtime":"2026-09-14T20:26:43+02:00","count":…}` | yes |
+| `countries` | GREEN | real run | `fproton countries --json` → 149 rows | yes |
+| `cities` | GREEN | real run | `fproton cities --country CH --json` → every row `"country":"CH"` | yes |
+| `index` | GREEN | real rebuild from the real 24 MB file + header re-read | `fproton index --rebuild --json` → `"servers":18221,"bytes":1478660,"duration_ms":64` | yes |
+| `settings` | GREEN | real round-trip through config.toml | `fproton settings set default_target CH` then `get` → `{"value":"CH"}` | yes |
+| `history` · `recents` | GREEN | real runs; rows written by the AMBER cases | `fproton history --json` → `{"count":1,"history":[{"action":"disconnect","result":"ok",…}]}` | yes |
+| `capabilities` · `robot-docs` · `version` | GREEN | real runs, schema asserted | `fproton capabilities \| jq` → `{"build_stage":"phase-1b-core","commands":23}` | yes |
+| `setup --dry-run` | GREEN | real run; the owner's `omarchy-menu.jsonc` sha256 unchanged | `fproton setup --all --dry-run --json` → `"dry_run":true`, no step `changed` | yes |
+| `disconnect --force` | GREEN | real run with `--yes`; nmcli active set byte-identical before/after | `fproton disconnect --force --yes --json` → `{"action":"disconnect","force":true,"ok":true}` in 163 ms | yes, as a no-op |
+| `port` (error path) | GREEN | real run, no tunnel | `fproton port --json` → `{"code":6,"code_name":"not_found","error":"there is no proton0 tunnel…"}` | error path only |
+| `signin` (argument validation) | GREEN | unit tests + a real usage-error run | `is_valid_username("; rm -rf") == false` | validation only |
+| `tui`, `doctor` | — | **not implemented in this build** (Phase 2 stubs, exit 1) | `fproton tui --json` → exit 2 "the TUI needs a terminal" | no |
+| `connect` | AMBER | own state dir, `--timeout 3` | exit 5 `upstream` after **3081 ms**, hint `fproton doctor --only cli` | timeout path only |
+| `reconnect` | AMBER | own state dir seeded with `recents:["CH"]`, `--timeout 3` | exit 5 after **3060 ms** | timeout path only |
+| `disconnect` (no `--force`) | AMBER | own state dir, `--timeout 3` | exit 5 after **3077 ms** | timeout path only |
+| `config list` · `config set` | AMBER | own state dirs, `--timeout 3` | exit 5 after **3056 / 3054 ms** | timeout path only |
+| `config get` | AMBER | real run against an empty cache | exit 5 `upstream`, hint `fproton config list` | timeout path only |
+| `account` | AMBER | own state dir at `--timeout 3` **and** at the un-overridden 15 s probe deadline | exit 5 after **3055 ms**; exit 5 after **15 052 ms** | timeout path only |
+| `signout` | AMBER | own state dir, `--timeout 3` | exit 5 after **3057 ms** | timeout path only |
+| CLI-hang backoff | AMBER | second call in the same state dir | exit 5 in **11 ms** without spawning; `status.cli.hang_suspected == true` + `cli_hang_suspected` warning | yes |
+| `connect`/`reconnect` success | **RED** | not verifiable: the Proton CLI is wedged (§1.2) | — | never |
+| `port` success | **RED** | no tunnel exists to ask | — | never |
+| `wg up` · `wg swap` | **RED** | never executed; gate asserted closed (`exit 2`, hint names `FPROTON_EXPERIMENTAL_WG`) | `fproton wg list` (ungated) → `{"code":2,…}` | never |
+| `wg list` | RED-adjacent | run live once, read-only | `FPROTON_EXPERIMENTAL_WG=1 fproton wg list --json` → the real `ProtonVPN CH#461`, endpoint `146.70.226.194:443` | no |
+| doctor `dns_when_connected`, `tunnel_route_ok` | **RED** | e2e prints `skip`: the doctor is a Phase-2 stub | — | never |
+
+Every row of the §4 table appears exactly once above.
