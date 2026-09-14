@@ -226,18 +226,40 @@ fn status_screen(m: &Tui, area: Rect, frame: &mut Frame, tier: Tier) {
         warnings(m, right[1], frame);
         recents(m, right[2], frame);
     } else {
+        // §7a's Status row requires "Warnings: every entry with text + hint" on this
+        // screen, and its Resize rule removes only the sparkline at 60-99 columns.
+        // The single-column branch used to drop the whole Warnings panel, so at the
+        // very common 80x24 a `warn` such as `conflicting_tunnel` was invisible.
+        // `warnings()` self-guards on `area.height < 3`, so a short terminal still
+        // degrades safely rather than drawing a broken box.
+        // A 24-row terminal leaves 22 rows for five panels, so the fixed slots shrink
+        // rather than one panel disappearing: a `warn` the user cannot see is worse
+        // than a Protections panel with one line fewer.
+        let tight = area.height < 25;
         let rows = Flex::vertical()
-            .constraints([
-                Constraint::Fixed(10),
-                Constraint::Fixed(5),
-                Constraint::Fill,
-                Constraint::Fixed(3),
-            ])
+            .constraints(if tight {
+                [
+                    Constraint::Fixed(8),
+                    Constraint::Fixed(3),
+                    Constraint::Fixed(5),
+                    Constraint::Fill,
+                    Constraint::Fixed(3),
+                ]
+            } else {
+                [
+                    Constraint::Fixed(10),
+                    Constraint::Fixed(5),
+                    Constraint::Fixed(7),
+                    Constraint::Fill,
+                    Constraint::Fixed(3),
+                ]
+            })
             .split(area);
         hero(m, rows[0], frame);
         traffic(m, rows[1], frame, false);
         protections(m, rows[2], frame);
-        recents(m, rows[3], frame);
+        warnings(m, rows[3], frame);
+        recents(m, rows[4], frame);
     }
 }
 
@@ -460,6 +482,12 @@ fn protections(m: &Tui, area: Rect, frame: &mut Frame) {
         return;
     }
     let mut lines: Vec<Line> = Vec::new();
+    // §7a: the CLI breaker gets "a persistent yellow row and `c/R/n` refused with the
+    // same text". The string comes from `cli_breaker_note`, which the refusal also
+    // uses, so the two cannot drift.
+    if let Some(note) = m.cli_breaker_note() {
+        lines.push(Line::styled(note, th.warn()));
+    }
     match m.status.as_ref() {
         None => lines.push(Line::styled("reading status…", th.dimmed())),
         Some(s) => {
@@ -512,8 +540,11 @@ fn protections(m: &Tui, area: Rect, frame: &mut Frame) {
             }
         }
     }
+    // Word-wrapped, like the Warnings panel: the breaker row carries its own runnable
+    // hint ("— run fproton doctor") and truncating it would drop exactly the half the
+    // reader needs. Every other line here is short enough to be unaffected.
     Paragraph::new(Text::from_lines(lines))
-        .wrap(WrapMode::None)
+        .wrap(WrapMode::Word)
         .render(inner, frame);
 }
 
@@ -537,8 +568,16 @@ fn warnings(m: &Tui, area: Rect, frame: &mut Frame) {
             .render(inner, frame);
         return;
     }
+    // Most severe first: at 60-99 columns this panel can be three rows tall, and the
+    // entry that gets cut must never be the `error` or the `warn`.
+    let mut ordered: Vec<&fproton_core::Warning> = list.iter().collect();
+    ordered.sort_by_key(|w| match w.severity {
+        fproton_core::Severity::Error => 0u8,
+        fproton_core::Severity::Warn => 1,
+        fproton_core::Severity::Info => 2,
+    });
     let mut lines = Vec::new();
-    for w in list {
+    for w in ordered {
         let style = match w.severity {
             fproton_core::Severity::Error => th.err(),
             fproton_core::Severity::Warn => th.warn(),
@@ -820,10 +859,13 @@ fn servers_screen(m: &Tui, area: Rect, frame: &mut Frame) {
         .render(rows[1], frame);
 
     if let Some(e) = &m.servers_err {
-        let text = if e.contains("index") {
-            format!("No server index. Press i to build it (fproton index --rebuild)\n\n{e}")
+        let text = if e.code_name == "index" {
+            format!(
+                "No server index. Press i to build it (fproton index --rebuild)\n\n{}\nhint: {}",
+                e.text, e.hint
+            )
         } else {
-            e.clone()
+            format!("{}\nhint: {}", e.text, e.hint)
         };
         Paragraph::new(text)
             .style(th.err())
@@ -833,7 +875,9 @@ fn servers_screen(m: &Tui, area: Rect, frame: &mut Frame) {
     }
     if m.servers.is_empty() {
         let text = if m.servers_loaded {
-            "No servers match this filter. Esc or / to edit it, f/t to widen the chips."
+            // Esc never edits the filter: it leaves the box when open, and cancels a
+            // running action (or does nothing) when closed. Advertise only `/`.
+            "No servers match this filter. / to edit it, f/t/o to widen the chips."
         } else {
             "loading the index…"
         };

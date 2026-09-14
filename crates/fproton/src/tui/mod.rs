@@ -109,6 +109,19 @@ const SPINNER: [&str; 4] = ["⠋", "⠙", "⠸", "⠴"];
 /// One sample per `status` poll; §7a asks for a 60-sample rx sparkline.
 const RX_SAMPLES: usize = 60;
 
+/// Why the Servers screen has no rows.
+///
+/// The §7a index empty state is chosen by `code_name`, never by the error's prose:
+/// gating on the substring "index" meant the real message — "Proton's server list is
+/// missing at …" — never matched, so the required "Press i to build it" line never
+/// appeared on a real install, and the error's own runnable hint was dropped too.
+#[derive(Clone, Debug)]
+pub struct ServersError {
+    pub code_name: String,
+    pub text: String,
+    pub hint: String,
+}
+
 pub enum Msg {
     Raw(Event),
     /// 1 s: re-read `status` (dropped when one is already in flight).
@@ -116,7 +129,7 @@ pub enum Msg {
     /// 120 ms: spinner, filter debounce, note expiry.
     Tick,
     Status(Box<Result<Status, String>>),
-    Servers(u64, Box<Result<Vec<ServerRow>, String>>),
+    Servers(u64, Box<Result<Vec<ServerRow>, ServersError>>),
     History(Box<Result<Vec<HistoryEntry>, String>>),
     Recents(Vec<String>),
     ActionDone(Action, Box<Result<String, ActionErr>>),
@@ -131,6 +144,9 @@ impl From<Event> for Msg {
 pub struct Tui {
     ctx: Context,
     exit: Arc<AtomicI32>,
+    /// Set when a `q q` quit cancelled a connect: `run()` runs `disconnect --force`
+    /// after the runtime has stopped, so §7a's cleanup is not lost (see `run`).
+    force_disconnect_on_exit: Arc<std::sync::atomic::AtomicBool>,
     theme: Theme,
     theme_mtime: Option<SystemTime>,
     screen: Screen,
@@ -144,7 +160,7 @@ pub struct Tui {
     rx: VecDeque<f64>,
 
     servers: Vec<ServerRow>,
-    servers_err: Option<String>,
+    servers_err: Option<ServersError>,
     servers_loaded: bool,
     query_seq: u64,
     filter: TextInput,
@@ -172,13 +188,29 @@ pub struct Tui {
 /// otherwise the §4a code of the session's last failed action (§7a). Never invents one.
 pub fn run(args: TuiArgs, ctx: Context) -> anyhow::Result<i32> {
     let exit = Arc::new(AtomicI32::new(0));
-    let app = Tui::new(args.screen(), ctx, exit.clone());
+    // §7a: "a cancelled connect is followed by `disconnect --force`". The Esc path
+    // queues that as the next action; the quit path cannot — the runtime stops the
+    // moment `Cmd::quit()` is returned, so a queued action would never run and a
+    // half-built tunnel outlived the TUI. The flag is honoured HERE, after the
+    // runtime has stopped the subscription (which trips the CancelToken and kills the
+    // connect child group), so the teardown cannot race the connect it is cleaning up.
+    let owed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let app = Tui::new(args.screen(), ctx.clone(), exit.clone(), owed.clone());
     App::fullscreen(app).run()?;
+    if owed.load(Ordering::SeqCst) {
+        // nmcli only, and bounded by the disconnect deadline like every other spawn.
+        let _ = engine::disconnect(&ctx, true, &fproton_core::CancelToken::new());
+    }
     Ok(exit.load(Ordering::SeqCst))
 }
 
 impl Tui {
-    fn new(screen: Screen, ctx: Context, exit: Arc<AtomicI32>) -> Tui {
+    fn new(
+        screen: Screen,
+        ctx: Context,
+        exit: Arc<AtomicI32>,
+        force_disconnect_on_exit: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Tui {
         let theme = Theme::load();
         let filter = TextInput::new()
             .with_placeholder("filter by name, country or city")
@@ -187,6 +219,7 @@ impl Tui {
         Tui {
             ctx,
             exit,
+            force_disconnect_on_exit,
             theme_mtime: std::fs::metadata(theme::colors_path())
                 .and_then(|m| m.modified())
                 .ok(),
@@ -259,7 +292,11 @@ impl Tui {
         Cmd::task(move || {
             Msg::Servers(
                 seq,
-                Box::new(index::servers(&ctx, &q).map_err(|e| e.to_string())),
+                Box::new(index::servers(&ctx, &q).map_err(|e| ServersError {
+                    code_name: e.code_name().to_string(),
+                    text: e.to_string(),
+                    hint: e.hint(),
+                })),
             )
         })
     }
@@ -319,6 +356,17 @@ impl Tui {
         if !needs_cli {
             return None;
         }
+        self.cli_breaker_note()
+    }
+
+    /// The breaker's own words, independent of any action.
+    ///
+    /// §7a wants `cli.hang_suspected`/backoff to produce "a persistent yellow row
+    /// **and** `c/R/n` refused with the same text". Only the refusal existed, so a
+    /// user who never pressed a key was never told the CLI was wedged. The Status
+    /// screen renders this; `cli_refusal` returns it — one source, so the row and the
+    /// refusal cannot drift apart.
+    pub(super) fn cli_breaker_note(&self) -> Option<String> {
         let cli = &self.status.as_ref()?.cli;
         let waiting = cli
             .backoff_until
@@ -340,6 +388,10 @@ impl Tui {
     /// CancelToken), then tear a half-built tunnel down.
     fn cancel_action(&mut self) -> Cmd<Msg> {
         let Some((_, action, _)) = self.action.take() else {
+            // The help overlay documents Esc as "close this overlay, else cancel the
+            // running action"; with nothing running it used to be a silent no-op, so
+            // the key read as dead. Every other refusal explains itself.
+            self.note("nothing running to cancel", false);
             return Cmd::none();
         };
         self.note(format!("cancelled: {}", action.label()), true);
@@ -636,6 +688,17 @@ impl Tui {
                 );
                 return Cmd::none();
             }
+            // What Esc would have queued next. `cancel_action` turns it into a
+            // pending action, which quitting immediately discards, so record the debt
+            // for `run()` to settle once the runtime has torn the child group down.
+            if self
+                .action
+                .as_ref()
+                .and_then(|(_, a, _)| a.cancel_cleanup())
+                .is_some()
+            {
+                self.force_disconnect_on_exit.store(true, Ordering::SeqCst);
+            }
             let _ = self.cancel_action();
             self.action = None;
         }
@@ -816,7 +879,12 @@ mod tests {
     fn model() -> Tui {
         let dir = std::env::temp_dir().join(format!("fproton-tui-test-{}", std::process::id()));
         let ctx = Context::for_test(&dir).expect("test context");
-        Tui::new(Screen::Status, ctx, Arc::new(AtomicI32::new(0)))
+        Tui::new(
+            Screen::Status,
+            ctx,
+            Arc::new(AtomicI32::new(0)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
     }
 
     /// Render into a real `Buffer` and read the text back, row by row.
@@ -896,7 +964,14 @@ mod tests {
             m.screen = screen;
             m.tabs.borrow_mut().active = screen.index();
             m.servers_loaded = true;
-            m.servers_err = Some("no server index".into());
+            m.servers_err = Some(ServersError {
+                code_name: "index".into(),
+                // Deliberately NOT containing the word "index": the §7a empty state
+                // used to be gated on that substring, while the core's real message
+                // is "Proton's server list is missing at <path>".
+                text: "Proton's server list is missing at /nowhere/serverlist.json".into(),
+                hint: "protonvpn connect".into(),
+            });
             let text = screen_text(&m, 100, 30);
             assert!(!text.trim().is_empty(), "{screen:?} rendered blank");
             assert!(text.contains('●'), "{screen:?} lost its badge:\n{text}");
@@ -943,6 +1018,112 @@ mod tests {
         assert_eq!(
             m.action.as_ref().map(|(_, a, _)| a.clone()),
             Some(Action::Disconnect(true))
+        );
+    }
+
+    #[test]
+    fn quitting_during_a_connect_still_owes_a_force_disconnect() {
+        // §7a: "a cancelled connect is followed by `disconnect --force`". The quit
+        // path discards the queued cleanup (the runtime stops immediately), so the
+        // debt is recorded for `run()` to settle after the child group is torn down.
+        let mut m = model();
+        let owed = m.force_disconnect_on_exit.clone();
+        let t: Target = "fastest".parse().expect("target");
+        let _ = m.start(Action::Connect(t));
+        let _ = m.quit(0); // first press only warns
+        let _ = m.quit(0); // second press cancels and quits
+        assert!(
+            owed.load(Ordering::SeqCst),
+            "a half-built tunnel would have outlived the TUI"
+        );
+    }
+
+    #[test]
+    fn quitting_with_nothing_running_owes_no_teardown() {
+        let mut m = model();
+        let owed = m.force_disconnect_on_exit.clone();
+        let _ = m.quit(0);
+        assert!(!owed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn escape_with_nothing_running_says_so_instead_of_doing_nothing() {
+        let mut m = model();
+        let _ = m.cancel_action();
+        assert_eq!(m.note, "nothing running to cancel");
+    }
+
+    #[test]
+    fn the_medium_tier_still_shows_the_warnings_panel() {
+        // §7a's Resize rule drops only the sparkline at 60-99 columns; the Warnings
+        // panel is required on the Status screen at every tier that has one.
+        let mut m = model();
+        let mut status = Status::empty("cli", "2026-09-15T00:00:00+02:00".into());
+        status.warnings.push(fproton_core::Warning {
+            id: "conflicting_tunnel".into(),
+            severity: fproton_core::Severity::Warn,
+            text: "tailscale0 is up and will contest the default route".into(),
+            hint: "sudo tailscale down".into(),
+        });
+        m.status = Some(status);
+        for (w, h) in [(80u16, 24u16), (99, 30), (120, 40)] {
+            let text = screen_text(&m, w, h);
+            assert!(
+                text.contains("Warnings"),
+                "no Warnings panel at {w}x{h}:\n{text}"
+            );
+            assert!(
+                text.contains("tailscale0"),
+                "the warning itself is invisible at {w}x{h}:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wedged_cli_is_a_persistent_row_not_only_a_refusal() {
+        // §7a: hang_suspected/backoff gets "a persistent yellow row AND c/R/n refused
+        // with the same text". Only the refusal existed.
+        let mut m = model();
+        let mut status = Status::empty("cli", "2026-09-15T00:00:00+02:00".into());
+        status.cli.hang_suspected = true;
+        m.status = Some(status);
+        let row = m.cli_breaker_note().expect("a breaker note");
+        for (w, h) in [(80u16, 24u16), (120, 40)] {
+            let text = screen_text(&m, w, h);
+            assert!(
+                text.contains("not answering"),
+                "the wedged CLI is invisible at {w}x{h}:\n{text}"
+            );
+        }
+        // The refusal uses the same string, so help and behaviour cannot drift.
+        let t: Target = "fastest".parse().expect("target");
+        let _ = m.start(Action::Connect(t));
+        assert_eq!(m.note, row);
+        assert!(
+            m.action.is_none(),
+            "the action must be refused, not started"
+        );
+    }
+
+    #[test]
+    fn a_missing_server_list_offers_the_rebuild_key() {
+        // §7a's index empty state was gated on the substring "index"; the core's real
+        // message is "Proton's server list is missing at <path>", so on a real install
+        // the required line never appeared.
+        let mut m = model();
+        m.screen = Screen::Servers;
+        m.tabs.borrow_mut().active = Screen::Servers.index();
+        m.servers_loaded = true;
+        m.servers_err = Some(ServersError {
+            code_name: "index".into(),
+            text: "Proton's server list is missing at /nowhere/serverlist.json".into(),
+            hint: "protonvpn connect".into(),
+        });
+        let text = screen_text(&m, 110, 24);
+        assert!(text.contains("Press i to build it"), "{text}");
+        assert!(
+            text.contains("protonvpn connect"),
+            "the hint is dropped:\n{text}"
         );
     }
 
