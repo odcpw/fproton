@@ -14,9 +14,9 @@ use crate::status::WARNING_IDS;
 use crate::{CONTRACT_VERSION, NAME, SCHEMA_VERSION, VERSION};
 
 /// Which phase of DESIGN.md §8 this binary was built at. Later phases update it.
-pub const BUILD_STAGE: &str = "phase-1a-api-freeze";
+pub const BUILD_STAGE: &str = "phase-1b-core";
 /// Said in `capabilities`, `robot-docs` and nowhere else: what this build really does.
-pub const BUILD_NOTE: &str = "Phase-1a API freeze: the command surface, the Status schema and the exit codes are final. The engine bodies land in Phase 1b, so most commands exit 1 with 'not implemented in this build'. Nothing here claims to connect.";
+pub const BUILD_NOTE: &str = "Phase-1b core: status, servers/countries/cities/index, settings, history/recents, port and setup are implemented and verified on this machine. connect/reconnect/disconnect/config/account/signout drive the official Proton CLI, which is wedged on this machine (a broken Secret Service default collection): only their deadline and error paths have been verified, never a successful connection. `tui` and `doctor` are Phase-2 stubs. `wg` is an unverified experiment behind FPROTON_EXPERIMENTAL_WG=1.";
 
 /// One row of the `commands` array in `capabilities`.
 #[derive(Serialize)]
@@ -128,9 +128,14 @@ Proton VPN for Omarchy. One binary: CLI, doctor, TUI, and the backend of the
 `oliver.protonvpn` bar widget.
 
 BUILD STAGE
-  This binary is the Phase-1a API freeze. The command surface, the Status schema and
-  the exit codes below are final. The engine bodies land in Phase 1b: until then most
-  commands exit 1 with "not implemented in this build". Nothing here claims to connect.
+  This binary is the Phase-1b core. What is verified end to end on this machine:
+  status, servers, countries, cities, index, settings, history, recents, capabilities,
+  robot-docs, version, setup --dry-run, disconnect --force (a no-op while nothing is
+  up) and port's no-tunnel error.
+  Verified only on their timeout/error path, because the official Proton CLI hangs on
+  this machine: connect, reconnect, disconnect, config list|get|set, account, signout.
+  Never verified, and claimed nowhere: a successful connect, a granted forwarded port,
+  and every `wg` subcommand. `tui` and `doctor` are Phase-2 stubs that exit 1.
 
 FIRST CALL
   fproton status --json      Everything about the current state, in one object.

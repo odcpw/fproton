@@ -46,16 +46,26 @@ pub struct Out {
     verbose: u8,
 }
 
+/// `--no-color` is a flag of `main.rs`, but `setup`, `doctor` and the TUI build their
+/// own [`Out`] from a `Context`, which does not carry it. `Out::new` records the flag
+/// here the first time it runs — always in `main` — so every later `Out` in the same
+/// process honours it too.
+static NO_COLOR_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl Out {
     /// Apply the whole policy once, at startup.
     pub fn new(json_flag: bool, no_color: bool, verbose: u8) -> Out {
+        use std::sync::atomic::Ordering;
+        if no_color {
+            NO_COLOR_FLAG.store(true, Ordering::SeqCst);
+        }
         let tty = stdout_is_tty();
         let env_no_color =
             std::env::var_os("NO_COLOR").is_some() || std::env::var_os("CI").is_some();
         Out {
             // Non-TTY stdout implies --json for every command (§2).
             json: json_flag || !tty,
-            color: tty && !no_color && !env_no_color,
+            color: tty && !NO_COLOR_FLAG.load(Ordering::SeqCst) && !env_no_color,
             verbose,
         }
     }
