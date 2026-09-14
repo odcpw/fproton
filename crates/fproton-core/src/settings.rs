@@ -309,6 +309,94 @@ pub fn validate(ctx: &Context) -> Result<Vec<String>, Error> {
 mod tests {
     use super::*;
 
+    /// The captured `protonvpn config set <K> --help` output, one per upstream key.
+    /// These are the contract this whitelist is asserted against (DESIGN.md §4).
+    const SET_HELP: &[(&str, &str)] = &[
+        (
+            "netshield",
+            include_str!("../../../tests/fixtures/protonvpn-help-config-set-netshield.txt"),
+        ),
+        (
+            "kill-switch",
+            include_str!("../../../tests/fixtures/protonvpn-help-config-set-kill-switch.txt"),
+        ),
+        (
+            "port-forwarding",
+            include_str!("../../../tests/fixtures/protonvpn-help-config-set-port-forwarding.txt"),
+        ),
+        (
+            "ipv6",
+            include_str!("../../../tests/fixtures/protonvpn-help-config-set-ipv6.txt"),
+        ),
+        (
+            "vpn-accelerator",
+            include_str!("../../../tests/fixtures/protonvpn-help-config-set-vpn-accelerator.txt"),
+        ),
+        (
+            "moderate-nat",
+            include_str!("../../../tests/fixtures/protonvpn-help-config-set-moderate-nat.txt"),
+        ),
+        (
+            "custom-dns",
+            include_str!("../../../tests/fixtures/protonvpn-help-config-set-custom-dns.txt"),
+        ),
+        (
+            "anonymous-crash-reports",
+            include_str!(
+                "../../../tests/fixtures/protonvpn-help-config-set-anonymous-crash-reports.txt"
+            ),
+        ),
+    ];
+
+    /// The `{off|standard}` metavar of a click `Choice` argument, as printed in the
+    /// `Usage:` line. Click wraps it across lines (`malware-ads-\n   trackers`), so the
+    /// braces are read with **all** whitespace removed, not collapsed to one space.
+    fn choices_from_usage(help: &str) -> Option<Vec<String>> {
+        let usage: String = help
+            .lines()
+            .take_while(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("");
+        let open = usage.find('{')?;
+        let close = usage[open..].find('}')? + open;
+        let inner: String = usage[open + 1..close]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        Some(inner.split('|').map(str::to_string).collect())
+    }
+
+    #[test]
+    fn every_settable_pair_appears_in_the_captured_config_set_help() {
+        for (key, values) in PROTON_CONFIG_SET_KEYS {
+            let help = SET_HELP
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, h)| *h)
+                .unwrap_or_else(|| panic!("no captured --help fixture for '{key}'"));
+            let upstream =
+                choices_from_usage(help).unwrap_or_else(|| panic!("no {{a|b}} in {key} --help"));
+            assert_eq!(
+                upstream,
+                values.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+                "the whitelist for '{key}' must be exactly what `protonvpn config set {key} --help` prints"
+            );
+        }
+    }
+
+    #[test]
+    fn the_readable_key_list_is_exactly_the_eight_upstream_keys() {
+        let mut fixture_keys: Vec<&str> = SET_HELP.iter().map(|(k, _)| *k).collect();
+        let mut ours: Vec<&str> = PROTON_CONFIG_KEYS.to_vec();
+        fixture_keys.sort_unstable();
+        ours.sort_unstable();
+        assert_eq!(ours, fixture_keys);
+        // The two keys we parse but deliberately do not expose to `config set` (§4).
+        for readonly in ["custom-dns", "anonymous-crash-reports"] {
+            assert!(!PROTON_CONFIG_SET_KEYS.iter().any(|(k, _)| *k == readonly));
+        }
+    }
+
     #[test]
     fn defaults_match_the_design_deadlines() {
         let t = Timeouts::default();
