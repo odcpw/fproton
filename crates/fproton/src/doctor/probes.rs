@@ -278,6 +278,10 @@ pub struct Probes {
     pub connection_persistence: FileProbe,
     pub resolvectl_dns: CmdProbe,
     pub ip_route: CmdProbe,
+    /// `ip -j route show default` — who owns the main-table default route.
+    pub ip_route_default: CmdProbe,
+    /// `ip -j route show table 52` — a default here means a Tailscale exit node.
+    pub ip_route_table52: CmdProbe,
 
     // ---- keyring
     pub busctl_list: CmdProbe,
@@ -417,6 +421,27 @@ impl Probes {
             );
             p.wireguard_module = FileProbe::stat(Path::new("/sys/module/wireguard"));
             p.connection_persistence = FileProbe::read(&ctx.paths.connection_persistence());
+            p.ip_route_default = run(
+                &[
+                    fproton_core::route::PROGRAM,
+                    "-j",
+                    "route",
+                    "show",
+                    "default",
+                ],
+                probe_deadline,
+            );
+            p.ip_route_table52 = run(
+                &[
+                    fproton_core::route::PROGRAM,
+                    "-j",
+                    "route",
+                    "show",
+                    "table",
+                    fproton_core::route::TAILSCALE_TABLE,
+                ],
+                probe_deadline,
+            );
         }
         if want(DoctorGroup::Connected) {
             // Both connected checks are `skip:link_down` unless the device exists (§4b RED).
@@ -770,6 +795,8 @@ pub fn named_commands(p: &Probes) -> Vec<(&'static str, &CmdProbe)> {
         ("nmcli-connections", &p.nmcli_connections),
         ("resolvectl-dns", &p.resolvectl_dns),
         ("ip-route-get", &p.ip_route),
+        ("ip-route-default", &p.ip_route_default),
+        ("ip-route-table52", &p.ip_route_table52),
         ("busctl-list", &p.busctl_list),
         ("busctl-readalias-default", &p.busctl_readalias),
         ("busctl-alias-property", &p.busctl_alias_property),
@@ -863,6 +890,14 @@ pub fn from_fixture_dir(dir: &Path) -> Probes {
             "connection",
             "show",
         ],
+    );
+    p.ip_route_default = cmd(
+        "ip-route-default.json",
+        &["ip", "-j", "route", "show", "default"],
+    );
+    p.ip_route_table52 = cmd(
+        "ip-route-table52.json",
+        &["ip", "-j", "route", "show", "table", "52"],
     );
     p.busctl_readalias = cmd("busctl-readalias-default.txt", &["busctl", "ReadAlias"]);
     p.busctl_alias_property = cmd("busctl-alias-property.txt", &["busctl", "get-property"]);

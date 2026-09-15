@@ -70,8 +70,11 @@ column boundary.
 ## NetworkManager (captured)
 
 Both Proton profiles were **inactive** at capture time, and `tailscale0` was active — the
-state DESIGN.md §4b calls GREEN for `disconnect --force` (a no-op) and the source of the
-`conflicting_tunnel` warning.
+state DESIGN.md §4b calls GREEN for `disconnect --force` (a no-op). `tailscale0` being up
+is not a conflict on its own: `tests/fixtures/doctor/conflicting_tunnel/input/ip-route-*.json`
+(captured `ip -j route show default` / `table 52`, no exit node) make that check pass, and
+`conflicting_tunnel__exit_node` adds a `default dev tailscale0` row to table 52 to produce
+the warning.
 
 | File | Command | ms |
 |---|---|---|

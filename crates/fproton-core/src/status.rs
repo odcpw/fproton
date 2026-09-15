@@ -31,6 +31,7 @@ pub const WARNING_IDS: &[&str] = &[
     "serverlist_missing",
     "protections_unknown",
     "conflicting_tunnel",
+    "killswitch_blocks_tailnet",
     "killswitch_orphan",
     "stale_pending",
     "not_signed_in",
@@ -750,20 +751,54 @@ pub fn status(ctx: &Context) -> Result<Status, Error> {
             "fproton config list",
         ));
     }
-    for device in &link.conflicting_tunnels {
-        let hint = if device.starts_with("tailscale") {
-            "tailscale set --exit-node="
-        } else {
-            "fproton doctor --only network"
-        };
-        s.warnings.push(warn(
-            "conflicting_tunnel",
-            Severity::Warn,
-            format!(
-                "{device} is up and will contest the default route and DNS with a Proton tunnel"
-            ),
-            hint,
-        ));
+    // Another tunnel being up is not a conflict: Tailscale without an exit node
+    // routes only the tailnet and coexists with Proton. Only a device that owns a
+    // default route (a second full VPN) or a Tailscale exit node contests the
+    // tunnel — `route.rs` reads that from `ip -j route`, ~6 ms, only when needed.
+    if !link.conflicting_tunnels.is_empty() {
+        let facts = crate::route::probe(ctx).unwrap_or_default();
+        let conflicts = crate::route::conflicts(&link.conflicting_tunnels, &facts);
+        for c in &conflicts {
+            let (text, hint) = match c.reason {
+                crate::route::ConflictReason::ExitNode => (
+                    format!(
+                        "{} is using a Tailscale exit node, a second full VPN: it will fight a Proton tunnel for the default route and DNS",
+                        c.device
+                    ),
+                    "tailscale set --exit-node=",
+                ),
+                crate::route::ConflictReason::DefaultRoute => (
+                    format!(
+                        "{} owns the default route and will contest it with a Proton tunnel",
+                        c.device
+                    ),
+                    "fproton doctor --only network",
+                ),
+            };
+            s.warnings
+                .push(warn("conflicting_tunnel", Severity::Warn, text, hint));
+        }
+        // Proton's kill switch blocks Tailscale's direct peer traffic while the
+        // tunnel is up (the old plugin's README documents this trade-off), so say
+        // so once the cached config shows it on — as information, not a fault.
+        let tailnet_up = link
+            .conflicting_tunnels
+            .iter()
+            .any(|d| d.starts_with("tailscale") && !conflicts.iter().any(|c| &c.device == d));
+        let ks_on = s
+            .config
+            .as_ref()
+            .and_then(|c| c.kill_switch.as_deref())
+            .map(|v| v != "off")
+            .unwrap_or(false);
+        if tailnet_up && ks_on {
+            s.warnings.push(warn(
+                "killswitch_blocks_tailnet",
+                Severity::Info,
+                "the kill switch blocks Tailscale's direct peer traffic while Proton is connected; tailnet devices will be unreachable until you disconnect",
+                "fproton config set kill-switch off",
+            ));
+        }
     }
     if link.killswitch_active && !link.up {
         s.warnings.push(warn(

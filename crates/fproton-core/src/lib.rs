@@ -18,6 +18,7 @@ pub mod natpmp;
 pub mod nm;
 pub mod paths;
 pub mod proc;
+pub mod route;
 pub mod secrets;
 pub mod settings;
 pub mod state;

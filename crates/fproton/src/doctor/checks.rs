@@ -723,14 +723,70 @@ fn conflicting_tunnel(p: &Probes) -> Verdict {
     if link.conflicting_tunnels.is_empty() {
         return Verdict::pass("no other tunnel device is active");
     }
-    Verdict::warn(
-        "other_tunnel",
-        format!(
-            "{} active and will contest the default route and DNS with a Proton tunnel",
-            link.conflicting_tunnels.join(", ")
-        ),
-    )
-    .cmd("tailscale set --exit-node=   # or: sudo tailscale down")
+    // Up is not a conflict. Only a device owning a default route, or a Tailscale
+    // exit node (a default in table 52), contests a Proton tunnel (§5, route.rs).
+    if !p.ip_route_default.taken || !p.ip_route_table52.taken {
+        return Verdict::skip(
+            "no_ip_route",
+            format!(
+                "{} active, but `ip -j route` was not taken so default-route ownership is unknown",
+                link.conflicting_tunnels.join(", ")
+            ),
+        );
+    }
+    let parse = |probe: &crate::doctor::probes::CmdProbe| -> Option<String> {
+        probe.success().then(|| probe.stdout.clone())
+    };
+    let (Some(main), Some(t52)) = (parse(&p.ip_route_default), parse(&p.ip_route_table52)) else {
+        return Verdict::skip(
+            "ip_failed",
+            format!(
+                "`ip -j route` failed: {} / {}",
+                p.ip_route_default.failure_detail(),
+                p.ip_route_table52.failure_detail()
+            ),
+        );
+    };
+    let facts = fproton_core::route::RouteFacts {
+        main_default_devs: fproton_core::route::default_devs(&main).unwrap_or_default(),
+        tailscale_exit_node: fproton_core::route::has_default(&t52).unwrap_or(false),
+    };
+    let conflicts = fproton_core::route::conflicts(&link.conflicting_tunnels, &facts);
+    if conflicts.is_empty() {
+        let tailnet = link
+            .conflicting_tunnels
+            .iter()
+            .any(|d| d.starts_with("tailscale"));
+        return Verdict::pass(if tailnet {
+            format!(
+                "{} is up without an exit node: it routes only the tailnet and coexists with a Proton tunnel (the kill switch, if on, will block direct peer traffic while connected)",
+                link.conflicting_tunnels.join(", ")
+            )
+        } else {
+            format!(
+                "{} is up but owns no default route",
+                link.conflicting_tunnels.join(", ")
+            )
+        });
+    }
+    let mut parts = Vec::new();
+    let mut cmd = "fproton doctor --only network";
+    for c in &conflicts {
+        match c.reason {
+            fproton_core::route::ConflictReason::ExitNode => {
+                parts.push(format!(
+                    "{} is using a Tailscale exit node, a second full VPN that will fight a Proton tunnel for the default route and DNS",
+                    c.device
+                ));
+                cmd = "tailscale set --exit-node=";
+            }
+            fproton_core::route::ConflictReason::DefaultRoute => parts.push(format!(
+                "{} owns the default route and will contest it with a Proton tunnel",
+                c.device
+            )),
+        }
+    }
+    Verdict::warn("other_tunnel", parts.join("; ")).cmd(cmd)
 }
 
 /// Report-only, always: the profile carries the WireGuard key and fproton cannot

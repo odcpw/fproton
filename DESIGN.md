@@ -435,7 +435,10 @@ and format only.
   sample exists (previous sample kept in state).
 - `warnings`: array of `{id, severity: info|warn|error, text, hint}`; ids stable and listed in
   `capabilities`: `cli_hang_suspected`, `serverlist_stale`, `serverlist_missing`,
-  `protections_unknown`, `conflicting_tunnel` (e.g. tailscale0 active), `killswitch_orphan`,
+  `protections_unknown`, `conflicting_tunnel` (another tunnel owns a default route, or a
+  Tailscale exit node is active — a merely-up `tailscale0` is NOT a conflict; `route.rs`
+  reads `ip -j route show default` and `table 52`), `killswitch_blocks_tailnet` (info: the
+  kill switch will block direct Tailscale peer traffic while connected), `killswitch_orphan`,
   `stale_pending`, `not_signed_in`, `secret_service_broken`.
 - `commands`: runnable next steps (fbittorrent's envelope name).
 
@@ -698,8 +701,12 @@ Checks (group · class · detection command · verdict rule):
   never restarts the daemon.
 - `proton_session_item` (keyring, D): `SearchItems a{ss} 1 service Proton` → pass if an item
   exists (feeds `status.signed_in`), else `fail:not_signed_in`.
-- `conflicting_tunnel` (network, D): any active `tun`/`wireguard` device other than
-  `proton0` (tailscale0 today) → `warn`, hint `sudo tailscale down` / `tailscale set --exit-node=`.
+- `conflicting_tunnel` (network, D): an active `tun`/`wireguard` device other than `proton0`
+  that **owns a default route** (`ip -j route show default`), or Tailscale with an **exit
+  node** (`default` in `ip -j route show table 52`) → `warn`, hint `tailscale set --exit-node=`.
+  A merely-up `tailscale0` passes: without an exit node it routes only the tailnet and
+  coexists with a Proton tunnel (the old plugin's README documents this from use); the pass
+  detail notes that the kill switch blocks direct peer traffic while connected.
 - `stale_proton_profiles` (network, D, report-only): inactive `ProtonVPN *` profiles not
   named in `connection_persistence.json` → `warn` at ≥ 3; `fix_cmd` prints
   `nmcli connection delete '<id>'` for the human. Never automated (the profile holds the key).

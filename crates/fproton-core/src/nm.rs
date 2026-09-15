@@ -51,7 +51,8 @@ pub struct LinkState {
     pub since: Option<String>,
     /// `pvpn-killswitch-ipv6` is active.
     pub killswitch_active: bool,
-    /// An active tun/wireguard device that is not `proton0` (tailscale0 here).
+    /// Active tun/wireguard devices other than `proton0` (tailscale0 here). Being
+    /// up is not a conflict by itself; `route::conflicts` decides (§5).
     pub conflicting_tunnels: Vec<String>,
 }
 
