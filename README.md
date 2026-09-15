@@ -256,8 +256,10 @@ them, and fproton caches the result.
   `port --keepalive` loop, no `watch` stream, no `wg import`. Those are v0.2 material.
 - Port forwarding is a one-shot NAT-PMP request with a 60 s lease; keeping it alive is the
   caller's job in v0.1.
-- `tailscale0` is active on this machine and will contest the default route and DNS with a
-  Proton tunnel. The doctor reports that as a warning, with the command to stop it.
+- `tailscale0` is active on this machine. That is not a conflict: without an exit node
+  Tailscale routes only the tailnet, so it coexists with a Proton tunnel. The doctor warns
+  only when another tunnel owns a default route or a Tailscale exit node is set, and it
+  notes that Proton's kill switch blocks direct tailnet peer traffic while connected.
 
 ## Credits
 
