@@ -832,3 +832,82 @@ core-is-silent clean, the argv gate non-vacuous (3/3), `tests/e2e.sh --full` **9
 failed, 0 skipped**, `tests/plugin-smoke.sh` **20 passed, 0 failed**. The one real
 `scripts/install.sh --yes` run, and therefore the `~/.local/bin/fproton` staleness the
 honesty reviewer found, belongs to the Phase-4 verifier and was deliberately not done here.
+
+## 2026-09-15 — Phase 4 (final verifier)
+
+Everything below was run on `t14` against commit `d77fe30` with a clean tree
+(`git status --porcelain` empty before and after; only DECISIONS.md changes in this entry).
+
+- **Gate.** `scripts/check.sh --full` → `check.sh: everything green (full)`: `cargo fmt
+  --check` no diff, `cargo clippy --all-targets -- -D warnings` clean, `cargo test`
+  **62 + 87 = 149** passed / 0 failed, core-is-silent clean, the argv gate non-vacuous
+  (3/3 in its self-test), `tests/e2e.sh --full` **96 passed, 0 failed, 0 skipped**,
+  `tests/plugin-smoke.sh` **20 passed, 0 failed**.
+- **The one real install.** `scripts/install.sh --yes` replaced a genuinely stale binary —
+  `~/.local/bin/fproton` was Sep 14 23:47 and answered `build_stage: phase-1b-core`, exactly
+  the staleness the honesty reviewer predicted. Afterwards `sha256sum` of
+  `~/.local/bin/fproton` and `target/release/fproton` are the same
+  (`5451f260ceac6c84…`), `command -v fproton` is `/home/oliver/.local/bin/fproton`, and
+  `fproton version` → `{"build_stage":"v0.1-integrated",…,"version":"0.1.0"}`.
+  `setup --all --yes` reported 4 steps `already` and one `changed`: `menu_entries`, backed
+  up verbatim to `~/.local/state/fproton/backups/omarchy-menu.jsonc.20260915T034933Z`. The
+  merged `omarchy-menu.jsonc` still parses (comments stripped, `jq` → 10 top-level keys) and
+  the five fproton ids sit under a `// fproton` marker before the final `}`. A second
+  `setup --all --yes` reported all five steps `already` and wrote no new backup — the
+  idempotence §4 requires, now observed on the real file rather than a sandbox.
+- **The widget is live.** `tests/plugin-smoke.sh` standalone: 20 passed, 0 failed, including
+  the IPC cursor query answering from the running shell
+  (`"alive":true,"binaryMissing":false,"sections":["header","warnings","quick","protections","footer"]`).
+  `omarchy plugin list` → `oliver.protonvpn  enabled  third-party  bar-widget  Proton VPN`;
+  `shell.json` `bar.layout.right` = `… oliver.torrents, oliver.protonvpn, omarchy.tailscale …`,
+  i.e. placed before `omarchy.tailscale` as §6.8 asks. `io.github.grichard99.omaproton-vpn`
+  is still `disabled`.
+- **Commands, as run from `/tmp` with the installed binary.** `status --json` — a complete
+  §5 object, `state: "error"` (the `last_error` an earlier AMBER run left behind; §5's table
+  says so and only a new action clears it), 18 221 servers, `signed_in: true`, `max_tier: 2`,
+  three warnings (`serverlist_stale`, `protections_unknown`, `conflicting_tunnel`).
+  `doctor` → exit **11**, 26 checks, **19 pass / 3 warn / 2 fail / 2 skip**; the two failures
+  are `cli_session_probe` (`fail:hang`, `config list` killed after **8015 ms**) and
+  `secret_service_default_alias` (`fail:phantom_collection`), exactly §1.2's diagnosis. (The
+  Phase-4 fixer recorded 18/4/2/2; the difference is `menu_entries`, which this install
+  turned from warn to pass.) `servers --country CH --limit 3` → CH#461/473/481, Zurich, loads
+  63/66/60. `countries` → 149. `disconnect --force --yes --dry-run` → exit 0 in 9 ms, printing
+  `["nmcli device disconnect proton0","nmcli connection down pvpn-killswitch-ipv6"]` and
+  changing nothing. `port` → exit 6 `not_found`. `tui` in real 100x30 and 100x20 tmux panes:
+  Status, Servers (18221/18221 shown) and History all render, `q` exits 0.
+- **The one bounded session probe.** `timeout 30 fproton connect --timeout 5` → exit **5**
+  `upstream`, `"protonvpn connect was killed at its 5s deadline"`, hint
+  `fproton doctor --only cli`. Immediately after: the active NetworkManager connection set is
+  unchanged (`oliwifi`, `tailscale0`, `lo`), `proton0` does not exist, `pending` is null, a
+  `timeout` history row was appended and `cli.backoff_until` was set 60 s ahead. I did not
+  capture its wall clock (`bc` is not installed on this box); the same path measured in the
+  e2e run above is 3069 ms at `--timeout 3`.
+- **Timing, honestly measured.** Neither `hyperfine` nor `/usr/bin/time` is installed here,
+  so this is a bash loop of 20 invocations timed as one batch with `date +%s%3N`:
+  `status --json` **25 ms** mean, `servers --country CH --json` **9 ms** mean (§2 budgets 50
+  and 20 ms). Timing each run separately — which pays for two `date` forks per iteration —
+  gives 37 ms / 11 ms mean with a 43 ms max, so the budget holds either way.
+
+### §4b verification matrix, re-filled by the Phase-4 verifier from the runs above
+
+| Command | Class | How verified today | Evidence | Claimed in README? |
+|---|---|---|---|---|
+| `status` | GREEN | run after the real install | exit 0, full §5 object, schema 1, mean **25 ms** over 20 runs | yes |
+| `servers`/`countries`/`cities`/`index` | GREEN | run + e2e | `servers --country CH --limit 3` → CH#461/473/481; `countries` → 149; `index --stats` → 18 221; mean **9 ms** | yes |
+| `settings`/`history`/`recents`/`version` | GREEN | run + e2e | exit 0, valid envelopes; `version` → `build_stage v0.1-integrated` | yes |
+| `capabilities`/`robot-docs` | GREEN | run + e2e | `robot-docs` prints the handbook; `capabilities` carries `build_stage`/`build_note` | yes |
+| `setup` (real, `--all --yes`) | GREEN | **the one real run**, via `scripts/install.sh --yes` | 4 `already` + `menu_entries` `changed` with a verbatim backup; the second run is all `already` | yes |
+| `setup --dry-run` | GREEN | e2e | exit 0, `.dry_run = true`, the owner's menu file byte-identical | yes |
+| `tui` | GREEN | real tmux panes 100x30 and 100x20 | all three screens render, `q` → exit 0 | yes |
+| `doctor` | GREEN | run on this machine | exit 11; 26 checks, 19/3/2/2; the keyring check is `fail:phantom_collection` | yes |
+| plugin `oliver.protonvpn` | GREEN | `tests/plugin-smoke.sh` + `omarchy plugin list` + `shell.json` | 20/0; enabled; loaded in the running shell; placed before `omarchy.tailscale` | yes |
+| `disconnect --force` | GREEN | run `--dry-run` + e2e | argv printed, 9 ms, nothing changed; still a no-op while both profiles are inactive | yes |
+| `port` (no tunnel) | GREEN | run | exit 6 `not_found`, hint `fproton connect p2p` | error path only |
+| `signin` (validation) | GREEN | e2e + unit tests | bad username → exit 2; no TTY → exit 2 | yes |
+| `connect`, `reconnect`, `disconnect`, `config list\|get\|set`, `account`, `signout` | AMBER | e2e `--full` + one bounded real `connect` | each exit 5 `upstream` in 3.02–3.07 s with a runnable hint; `account` at the 15 s probe deadline exits 5 after 15 044 ms; the backoff answers a second call in 6 ms; my real `connect --timeout 5` exit 5, nothing connected | deadline path only |
+| `connect`/`reconnect` **success**, `port` **success**, `wg *` | RED | still not verifiable: the Proton CLI is wedged (§1.2) | — | never; `connect --help` and `port --help` say so |
+| doctor `dns_when_connected`, `tunnel_route_ok` | RED | doctor run + e2e assertion | both `skip:link_down`: "proton0 does not exist; this check needs a live tunnel and has never run on this machine" | never |
+
+No row moved class in this pass. Nothing that was RED became verifiable; nothing that was
+claimed GREEN failed. The only material change to the machine is the install itself
+(binary, menu entries), reversible with `scripts/uninstall.sh`.
