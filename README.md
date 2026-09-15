@@ -61,7 +61,7 @@ By hand, or to see what `setup` does:
 cargo build --release && install -m0755 target/release/fproton ~/.local/bin/
 ln -sfn "$PWD/plugin/oliver.protonvpn" ~/.config/omarchy/plugins/oliver.protonvpn
 omarchy plugin enable oliver.protonvpn
-omarchy bar put oliver.protonvpn --before omarchy.tailscale
+omarchy bar move oliver.protonvpn --before omarchy.tailscale
 fproton setup --menu                  # adds the protonvpn.* entries to the Omarchy menu
 ```
 

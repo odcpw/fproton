@@ -22,7 +22,7 @@ By hand:
 ```bash
 ln -sfn "$PWD/plugin/oliver.protonvpn" ~/.config/omarchy/plugins/oliver.protonvpn
 omarchy plugin enable oliver.protonvpn
-omarchy bar put oliver.protonvpn --before omarchy.tailscale
+omarchy bar move oliver.protonvpn --before omarchy.tailscale
 ```
 
 `fproton` must be on the shell's PATH, which includes `~/.local/bin` and not `~/.cargo/bin`.

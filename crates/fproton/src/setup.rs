@@ -167,7 +167,7 @@ fn link_plugin(ctx: &Context, dry_run: bool) -> Step {
     }
 }
 
-/// `omarchy plugin enable oliver.protonvpn` + `omarchy bar put … --before omarchy.tailscale`.
+/// `omarchy plugin enable oliver.protonvpn` + `omarchy bar move … --before omarchy.tailscale`.
 fn enable_plugin(ctx: &Context, dry_run: bool) -> Step {
     match plugin_state(ctx, PLUGIN_ID).as_deref() {
         Some("enabled") => {
@@ -191,7 +191,7 @@ fn enable_plugin(ctx: &Context, dry_run: bool) -> Step {
             name: "plugin_enabled",
             outcome: "would",
             detail: format!(
-                "omarchy plugin enable {PLUGIN_ID} && omarchy bar put {PLUGIN_ID} --before {BAR_ANCHOR}"
+                "omarchy plugin enable {PLUGIN_ID} && omarchy bar move {PLUGIN_ID} --before {BAR_ANCHOR}"
             ),
         };
     }
@@ -202,16 +202,27 @@ fn enable_plugin(ctx: &Context, dry_run: bool) -> Step {
             detail: e.to_string(),
         };
     }
-    match omarchy(ctx, &["bar", "put", PLUGIN_ID, "--before", BAR_ANCHOR]) {
+    // `omarchy plugin enable` already puts the widget on the bar at the section's
+    // default slot, and `omarchy bar put` leaves a widget that is already on the bar
+    // where it is ("a widget already on the bar is left where it is",
+    // /usr/share/omarchy/bin/omarchy-bar). `bar move` is what positions it.
+    match omarchy(ctx, &["bar", "move", PLUGIN_ID, "--before", BAR_ANCHOR]) {
         Ok(_) => Step {
             name: "plugin_enabled",
             outcome: "changed",
-            detail: format!("enabled and placed before {BAR_ANCHOR}"),
+            detail: format!("enabled and moved before {BAR_ANCHOR}"),
+        },
+        // No anchor widget on this bar (e.g. Tailscale not shown): the enable-time
+        // placement stands, and that is not a failure.
+        Err(e) if e.to_string().contains("could not find target widget") => Step {
+            name: "plugin_enabled",
+            outcome: "changed",
+            detail: format!("enabled; {BAR_ANCHOR} is not on the bar, left at the default slot"),
         },
         Err(e) => Step {
             name: "plugin_enabled",
             outcome: "failed",
-            detail: format!("enabled, but not placed: {e}"),
+            detail: format!("enabled, but not moved before {BAR_ANCHOR}: {e}"),
         },
     }
 }
