@@ -617,9 +617,14 @@ pub fn status(ctx: &Context) -> Result<Status, Error> {
                 entry_ip: r.entry_ip,
                 exit_ip: r.exit_ip,
             },
+            // Unknown to the index (a server newer than the snapshot, or a small test
+            // fixture): keep the name and the country its prefix spells (§5), null the rest.
             None => Server {
+                country: name
+                    .get(..2)
+                    .filter(|p| p.bytes().all(|b| b.is_ascii_uppercase()))
+                    .map(str::to_string),
                 name,
-                country: None,
                 country_name: None,
                 city: None,
                 lat: None,
@@ -1001,19 +1006,33 @@ mod tests {
         assert_eq!(v["engine"], "cli");
         assert_eq!(v["max_tier"], 2, "the fixture's MaxTier");
 
-        // The last connection, resolved by NetworkManager UUID (§5).
+        // §5 resolution order. This test runs the real `status()`, which asks the real
+        // nmcli: when a Proton tunnel is up on this machine rule (1) — the active
+        // profile — wins over the fixture's persistence file, so assert that branch;
+        // otherwise rule (2) resolves the fixture's CH#461 by UUID.
         let server = &v["server"];
-        assert_eq!(server["name"], "CH#461");
-        assert_eq!(server["country"], "CH");
-        assert_eq!(server["country_name"], "Switzerland");
-        assert_eq!(server["city"], "Zurich");
-        assert_eq!(server["load"], 63);
-        assert_eq!(server["score"], 1.8623468195);
-        assert_eq!(server["tier"], 2);
-        assert_eq!(server["features_raw"], 28);
-        assert_eq!(server["features"][0], "p2p");
-        assert_eq!(server["entry_ip"], "146.70.226.194");
-        assert_eq!(v["link"]["endpoint"], "146.70.226.194:443");
+        if v["link"]["up"] == true {
+            let active = v["link"]["nm_connection"]
+                .as_str()
+                .and_then(|n| n.strip_prefix("ProtonVPN "))
+                .expect("an up link names its ProtonVPN profile")
+                .to_string();
+            assert_eq!(server["name"], active);
+            assert!(server["country"].is_string());
+            assert!(server.get("load").is_some(), "every server key is present");
+        } else {
+            assert_eq!(server["name"], "CH#461");
+            assert_eq!(server["country"], "CH");
+            assert_eq!(server["country_name"], "Switzerland");
+            assert_eq!(server["city"], "Zurich");
+            assert_eq!(server["load"], 63);
+            assert_eq!(server["score"], 1.8623468195);
+            assert_eq!(server["tier"], 2);
+            assert_eq!(server["features_raw"], 28);
+            assert_eq!(server["features"][0], "p2p");
+            assert_eq!(server["entry_ip"], "146.70.226.194");
+            assert_eq!(v["link"]["endpoint"], "146.70.226.194:443");
+        }
 
         // `state` is whatever the truth table says about the real machine, never a
         // sixth value, and every key of the document is present.

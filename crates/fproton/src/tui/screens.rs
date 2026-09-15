@@ -491,13 +491,16 @@ fn protections(m: &Tui, area: Rect, frame: &mut Frame) {
     match m.status.as_ref() {
         None => lines.push(Line::styled("reading status…", th.dimmed())),
         Some(s) => {
+            // `kill_switch.active` is the CLI's `pvpn-killswitch-ipv6` leak-guard
+            // profile, which it raises for every connection regardless of the
+            // kill-switch *setting* (that one is `config.kill-switch`, below).
             lines.push(Line::from_spans([
-                Span::styled("kill switch  ", th.dimmed()),
+                Span::styled("leak guard   ", th.dimmed()),
                 Span::styled(
                     if s.kill_switch.active {
-                        "active"
+                        "up (ipv6 leak guard profile)"
                     } else {
-                        "inactive"
+                        "down"
                     },
                     if s.kill_switch.active {
                         th.ok()

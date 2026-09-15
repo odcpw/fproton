@@ -913,3 +913,53 @@ claimed GREEN failed. The only material change to the machine is the install its
 (binary, menu entries), reversible with `scripts/uninstall.sh`.
 - 2026-09-15 · orchestrator · `setup` positions the widget with `omarchy bar move … --before omarchy.tailscale` instead of `bar put`: `omarchy plugin enable` already places the widget at the section's default slot and `bar put` leaves an already-placed widget where it is (`/usr/share/omarchy/bin/omarchy-bar`: "a widget already on the bar is left where it is"), so on a fresh install `put` never repositioned it (the Phase-2 plugin agent moved it by hand). A missing anchor widget is not a failure: the enable-time placement stands. README snippets updated to match. Verified: fmt/clippy/tests green, `setup --all --dry-run` reports five `already` on this machine.
 - 2026-09-15 · orchestrator · `conflicting_tunnel` narrowed to real conflicts after the owner asked whether fproton "switches" between Tailscale and Proton (it does not, and need not). Verified on this machine: with no exit node Tailscale's table 52 holds only `100.x/32` routes and no default; an exit node is what adds `default dev tailscale0`. New `fproton-core::route` reads `ip -j route show default` and `table 52` (6 ms, only when another tunnel is up); a conflict is a tunnel owning a main-table default route or a Tailscale exit node. `status` and the doctor now pass for a merely-up `tailscale0` (detail explains coexistence), and a new info warning `killswitch_blocks_tailnet` appears once the cached config shows the kill switch on, because it blocks direct tailnet peer traffic while connected (old plugin README, "Using it with Tailscale"). Fixtures: the captured no-exit-node case passes; `conflicting_tunnel__exit_node` warns. Gate after: clippy clean, 154 tests, e2e --fast 83/83, plugin-smoke 20/20; binary reinstalled; `fproton status` on this box now shows only the two info warnings.
+
+## 2026-09-15 — first connect after the keyring repair (orchestrator, live on the owner's machine)
+
+The owner rebooted; the reboot rebuilt the login keyring, so the Secret Service `default`
+alias now resolves to a real unlocked collection (`Default_5fkeyring`) and the Proton CLI
+answers in ~200 ms. The old session was gone with the old keyring, so the owner ran
+`fproton signin odc` in a terminal (interactive; "Successfully signed in as 'odc'"). Everything
+below is real output from this machine; times are wall clock.
+
+| Command | Result |
+|---|---|
+| `fproton doctor --only keyring` | `secret_service_default_alias: pass` (alias → Default_5fkeyring, unlocked); before sign-in `proton_session_item: fail:not_signed_in`, after: `pass — 2 item(s) with service=Proton` |
+| `fproton doctor --only cli` | `cli_help_fast: pass (213 ms)`, `cli_session_probe` before sign-in `fail:not_signed_in` (no hang), after: pass |
+| `fproton account --json` | `{"name":"odc"}` |
+| `fproton config list --json` | netshield malware-only · kill-switch off · port-forwarding off · ipv6 on · vpn-accelerator on · moderate-nat off · custom-dns off · anonymous-crash-reports on |
+| `fproton connect CH --wait --timeout 90 --json` | `ok:true` in **1.83 s**; status: `state connected`, `link.up`, `proton0`, server **CH#507** Zurich load 41, traffic non-null |
+| `fproton doctor --only connected` | `dns_when_connected: pass — proton0 uses Proton's resolver 10.2.0.1`; `tunnel_route_ok: pass — 1.1.1.1 routes via proton0` — first time these left `skip` |
+| `curl -s https://ifconfig.co/json` | `{"ip":"185.230.125.15","country":"Switzerland","asn_org":"M247 Europe SRL"}` |
+| `tailscale status` | all peers still listed while connected (kill switch off; no exit node) — the coexistence rule from the `route` change holds live |
+| `fproton disconnect --json` | `ok:true` in **0.86 s**; status `disconnected`, both NM profiles down (the leak-guard dummy goes down with the tunnel) |
+| `fproton reconnect --json` | `ok:true` in **1.64 s**; back on CH#507 |
+| `fproton config set netshield malware-only --json` | `ok:true` in 0.79 s (set to its current value on purpose: exercises the path without changing the owner's settings); `config get netshield` → `malware-only` |
+| `fproton port --json` | exit **5** `upstream`: "the NAT-PMP gateway 10.2.0.1:5351 did not answer in 4 tries (Connection refused)", hint `fproton config set port-forwarding on` — expected with port forwarding off; `port` success stays RED |
+| `fproton doctor --json` (connected) | `{"total":26,"pass":26,"warn":0,"fail":0,"skip":0}` |
+| `fproton history --limit 3` | `connect CH → ok, CH#507, 1 s` on top of the pre-repair `timeout` rows |
+| bar widget (`omarchy-shell oliver.protonvpn cursor`) | `{"alive":true,"state":"connected"}` |
+
+Two observations, both handled:
+- **Transient `secret_service_broken` / `signed_in: null`** in the first `status` after
+  sign-in: the 60 s-cached Secret Service probe ran (or timed out at 1 s) while the CLI was
+  still writing the session; the next probe returned `signed_in: true` and the warning
+  cleared. Left as is — a one-poll flash under a bounded probe is the designed behaviour.
+- **`kill_switch.active` is the leak guard, not the setting.** `pvpn-killswitch-ipv6` was up
+  during the connection although `config.kill-switch` is `off`: the CLI raises that dummy
+  profile (IPv6 leak protection) for every connection. The TUI row that said
+  "kill switch: active" now says "leak guard: up (ipv6 leak guard profile)"; DESIGN §5 and
+  the widget's Protections rows take the kill-switch mode from `config.kill-switch` only.
+
+§4b after this session: GREEN now also covers `signin`, `account`, `config list|get|set`,
+`connect`, `disconnect`, `reconnect`, `dns_when_connected`, `tunnel_route_ok`. AMBER: `signout`
+(never run; it would end the session) and the deadline/backoff paths (still asserted by e2e).
+RED: `port` success (needs port forwarding on and a P2P server), `wg *` (kill criterion
+unchanged; certificate expiry 2026-09-21).
+
+A pre-existing unit test (`status_resolves_the_last_server_from_the_persistence_file_by_uuid`)
+failed once the tunnel was up: it injects a fixture persistence file but runs the real
+`status()`, which correctly prefers the active profile (§5 rule 1). Made state-aware in the
+same commit: it asserts the fixture branch when no Proton profile is active and the
+active-profile branch otherwise, instead of assuming a disconnected machine.
+- 2026-09-15 · orchestrator · Tests written for a wedged CLI made state-aware now that the CLI works: (1) `tests/e2e.sh --full` skips its AMBER block when `cli_session_probe` passes, because on a healthy CLI those rows would run a real `signout`, `config set` and `connect` against the owner's session (the pre-repair transcript stays as the evidence for the deadline paths); (2) the `port` row expects 6 without a tunnel, and 0 or 5-upstream with one; (3) the doctor's connected-group rows expect `pass` with a tunnel up, `skip` without; (4) the core status unit test asserts the active-profile branch when a tunnel is up. Also: a server unknown to the index (newer than the snapshot, or a small fixture) now keeps `country` from its name prefix, as §5 says, instead of nulling it. Gate with the tunnel up: 154 tests, e2e --fast 80/80, e2e --full 82 passed / 1 skipped, plugin-smoke 20/20.

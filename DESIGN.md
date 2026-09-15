@@ -314,6 +314,12 @@ Global flags: `--json`, `--timeout <s>` (override external deadlines), `-v`, `--
 
 ### 4b. Verification matrix (Phase 1 pastes the filled table into DECISIONS.md; README "Status" mirrors it)
 
+> Re-verified 2026-09-15 after the keyring repair: `connect`, `disconnect`, `reconnect`,
+> `config list|get|set`, `account`, `signin` and both connected-group doctor checks are GREEN
+> now (DECISIONS.md, "first connect after the keyring repair"). The lists below are the
+> pre-repair classification the code was built and tested against; RED today is only `port`
+> success (port forwarding off) and `wg *`.
+
 Columns: `command | class | how verified today | evidence (exact command + first line of real output) | claimed in README?`
 
 - **GREEN — end-to-end verifiable on this machine now:** `status`, `servers`, `countries`,
@@ -429,7 +435,11 @@ and format only.
   table is `null` (never absent); `null` as a whole if never probed. On this
   machine it stays `null` until the keyring is fixed; then `warnings` carries
   `protections_unknown`. `kill_switch.active` is always derivable (nmcli: is
-  `pvpn-killswitch-ipv6` active). `supported` is `false` whenever `engine != "cli"`.
+  `pvpn-killswitch-ipv6` active) — but note it is the CLI's IPv6 *leak-guard* profile, which
+  the CLI raises for every connection regardless of the kill-switch setting (verified
+  2026-09-15 with `kill-switch: off`); the configured mode is `config.kill-switch`, and UIs
+  must label `active` as the leak guard, never as "kill switch on". `supported` is `false`
+  whenever `engine != "cli"`.
 - `traffic`: `null` whenever `/sys/class/net/<device>` is absent; when present
   `{rx_bytes, tx_bytes, rx_bps, tx_bps, sampled_at}` with `*_bps` `null` until a second
   sample exists (previous sample kept in state).

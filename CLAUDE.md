@@ -20,8 +20,9 @@ FrankenTUI app (`fproton tui`), a `doctor`, and a thin Quickshell bar widget
   `nmcli --show-secrets`. The only sanctioned keyring read is the 16-byte pointer file.
 - Core is silent (no print macros in `fproton-core`). The doctor never deletes anything.
 - `--json` on every command; non-TTY stdout is JSON; errors carry a runnable `hint`.
-- Claim nothing RED in README/`--help`/robot-docs. The Proton CLI hangs on this machine
-  (keyring phantom collection, DESIGN §1.2) until the owner repairs it.
+- Claim nothing RED in README/`--help`/robot-docs. The keyring fault (DESIGN §1.2) was
+  repaired by a reboot on 2026-09-15; the CLI answers and connects now. Keep the deadlines
+  anyway — that hang is the failure mode this tool exists for.
 - Append to `DECISIONS.md`; never rewrite earlier entries.
 
 ## Build, test, install
@@ -39,7 +40,9 @@ repo directory (`omarchy-plugin-validate plugin/oliver.protonvpn`), never the in
 · `crates/fproton/src/{main,output,setup}.rs`, `src/doctor/`, `src/tui/` · `plugin/oliver.protonvpn/`
 · `tests/{e2e.sh,plugin-smoke.sh,fixtures/}` · `scripts/{check,install,uninstall}.sh` · `docs/ROBOT.md` (generated).
 
-## Owner's next steps (as of 2026-09-15)
-1. Repair the keyring: reboot, or `fproton doctor --fix --allow-keyring --yes --only keyring`.
-2. `fproton signin <user>` from a terminal, then `fproton connect CH --wait`.
-3. Re-fill DESIGN §4b / README Status from real output; the `wg` experiment has a kill criterion (DESIGN §4).
+## State (2026-09-15)
+Signed in as `odc`; `connect CH` / `disconnect` / `reconnect` verified live (CH#507, exit IP
+in Switzerland, DNS and default route via `proton0`, doctor 26/26). Still unverified: `port`
+success (needs `fproton config set port-forwarding on` and a P2P server) and the `wg`
+experiment (DESIGN §4 kill criterion; certificate expiry 2026-09-21). Tailscale coexists
+(no exit node); the kill switch is off in the owner's Proton config.

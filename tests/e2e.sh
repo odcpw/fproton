@@ -155,8 +155,21 @@ run 2 "config set kill-switch permanent" -- "$BIN" config set kill-switch perman
 jq_is '.code_name' 'usage' "there is no kill-switch permanent upstream"
 run 2 "config set protocol wireguard" -- "$BIN" config set protocol wireguard --json
 run 2 "tui without a TTY" -- "$BIN" tui --json
-run 6 "port without a tunnel" -- "$BIN" port --json
-jq_is '.code_name' 'not_found' "port with no tunnel is exit 6"
+# `port` depends on the machine's tunnel state: no tunnel → 6 not_found; a tunnel up →
+# either a mapping (0) or, with port forwarding off, the gateway refuses → 5 upstream.
+if "$BIN" status --json | jq -e '.link.up == true' >/dev/null 2>&1; then
+  OUT=$("$BIN" port --json 2>/dev/null); rc=$?
+  case "$rc" in
+    0) ok "port with a tunnel up returned a mapping" ;;
+    5) printf '%s' "$OUT" | jq -e '.code_name == "upstream"' >/dev/null \
+         && ok "port with a tunnel up but port forwarding off is exit 5 upstream" \
+         || bad "port exit 5 without code_name upstream" ;;
+    *) bad "port with a tunnel up — expected exit 0 or 5, got $rc" ;;
+  esac
+else
+  run 6 "port without a tunnel" -- "$BIN" port --json
+  jq_is '.code_name' 'not_found' "port with no tunnel is exit 6"
+fi
 
 head_ "RED: the experiment stays gated (§4b)"
 run 2 "wg list without the env gate" -- "$BIN" wg list --json
@@ -291,75 +304,85 @@ jq_is '.dry_run' 'true' "setup without --yes is a dry run"
 # ---------------------------------------------------------------- AMBER rows
 
 if [[ "$MODE" == "full" ]]; then
-  head_ "AMBER: the Proton CLI's deadline path (§4b) — never a success assertion"
-  amber() { # amber <label> <argv...>
-    local label="$1"; shift
-    local dir="$RUN_DIR/amber-$(echo "$label" | tr -c 'a-zA-Z0-9' '-')"
-    mkdir -p "$dir"
-    local start end ms code out
+  # The AMBER rows reproduce a wedged CLI: exit 5 at the deadline, then the backoff.
+  # On a machine whose CLI answers they cannot be reproduced, and running them would
+  # execute a real signout, config set and connect against the owner's session.
+  if "$BIN" doctor --only cli --json 2>/dev/null \
+       | jq -e '[.checks[] | select(.id=="cli_session_probe") | .status] | first == "pass"' >/dev/null 2>&1; then
+    head_ "AMBER: skipped — the Proton CLI answers on this machine"
+    skip "AMBER deadline paths need a wedged CLI to reproduce" \
+         "on a healthy CLI they would run a real signout, config set and connect; the pre-repair transcript is in DECISIONS.md"
+  else
+    head_ "AMBER: the Proton CLI's deadline path (§4b) — never a success assertion"
+    amber() { # amber <label> <argv...>
+      local label="$1"; shift
+      local dir="$RUN_DIR/amber-$(echo "$label" | tr -c 'a-zA-Z0-9' '-')"
+      mkdir -p "$dir"
+      local start end ms code out
+      start=$(date +%s%N)
+      out="$(FPROTON_STATE_DIR="$dir" "$BIN" "$@" --timeout 3 --json 2>&1)"; code=$?
+      end=$(date +%s%N); ms=$(( (end - start) / 1000000 ))
+      local name; name="$(printf '%s' "$out" | jq -r '.code_name // "?"' 2>/dev/null)"
+      local hint; hint="$(printf '%s' "$out" | jq -r '.hint // ""' 2>/dev/null)"
+      if [[ "$code" != 5 ]]; then
+        bad "$label — expected exit 5 (upstream), got $code in ${ms} ms" "${out:0:200}"
+        # If the CLI ever answers, make sure this script did not leave a tunnel behind.
+        [[ "$label" == connect* ]] && "$BIN" disconnect --force --yes --json >/dev/null 2>&1
+        return
+      fi
+      [[ "$name" == "upstream" ]] || { bad "$label — code_name is '$name'"; return; }
+      [[ -n "$hint" ]] || { bad "$label — no hint"; return; }
+      if (( ms < 2500 || ms > 8000 )); then
+        bad "$label — ${ms} ms is outside 2500-8000 ms (a sub-second exit means the backoff answered)"
+        return
+      fi
+      ok "$label — exit 5 upstream after ${ms} ms, hint: $hint"
+    }
+    amber "account" account
+    amber "config-list" config list
+    amber "config-set" config set netshield off
+    amber "signout" signout
+    amber "disconnect" disconnect
+    amber "connect-fastest" connect fastest
+
+    # reconnect needs a previous target: seed one in this case's own state dir.
+    RDIR="$RUN_DIR/amber-reconnect"; mkdir -p "$RDIR"
+    printf '{"recents":["CH"]}' > "$RDIR/state.json"
     start=$(date +%s%N)
-    out="$(FPROTON_STATE_DIR="$dir" "$BIN" "$@" --timeout 3 --json 2>&1)"; code=$?
-    end=$(date +%s%N); ms=$(( (end - start) / 1000000 ))
-    local name; name="$(printf '%s' "$out" | jq -r '.code_name // "?"' 2>/dev/null)"
-    local hint; hint="$(printf '%s' "$out" | jq -r '.hint // ""' 2>/dev/null)"
-    if [[ "$code" != 5 ]]; then
-      bad "$label — expected exit 5 (upstream), got $code in ${ms} ms" "${out:0:200}"
-      # If the CLI ever answers, make sure this script did not leave a tunnel behind.
-      [[ "$label" == connect* ]] && "$BIN" disconnect --force --yes --json >/dev/null 2>&1
-      return
+    out="$(FPROTON_STATE_DIR="$RDIR" "$BIN" reconnect --timeout 3 --json 2>&1)"; code=$?
+    end=$(date +%s%N); ms=$(( (end-start)/1000000 ))
+    if [[ "$code" == 5 ]] && (( ms >= 2500 && ms <= 8000 )); then
+      ok "reconnect — exit 5 upstream after ${ms} ms"
+    else
+      bad "reconnect — exit $code in ${ms} ms" "${out:0:200}"
     fi
-    [[ "$name" == "upstream" ]] || { bad "$label — code_name is '$name'"; return; }
-    [[ -n "$hint" ]] || { bad "$label — no hint"; return; }
-    if (( ms < 2500 || ms > 8000 )); then
-      bad "$label — ${ms} ms is outside 2500-8000 ms (a sub-second exit means the backoff answered)"
-      return
+
+    head_ "AMBER: the 60 s backoff answers the second call (§2)"
+    BDIR="$RUN_DIR/backoff"; mkdir -p "$BDIR"
+    FPROTON_STATE_DIR="$BDIR" "$BIN" account --timeout 3 --json >/dev/null 2>&1
+    start=$(date +%s%N)
+    out="$(FPROTON_STATE_DIR="$BDIR" "$BIN" account --timeout 3 --json 2>&1)"; code=$?
+    end=$(date +%s%N); ms=$(( (end-start)/1000000 ))
+    if [[ "$code" == 5 ]] && (( ms < 1000 )); then
+      ok "the second call exits 5 in ${ms} ms without spawning the CLI (backoff)"
+    else
+      bad "the backoff did not short-circuit: exit $code in ${ms} ms" "${out:0:200}"
     fi
-    ok "$label — exit 5 upstream after ${ms} ms, hint: $hint"
-  }
-  amber "account" account
-  amber "config-list" config list
-  amber "config-set" config set netshield off
-  amber "signout" signout
-  amber "disconnect" disconnect
-  amber "connect-fastest" connect fastest
+    FPROTON_STATE_DIR="$BDIR" "$BIN" status --json | jq -e '.cli.hang_suspected == true' >/dev/null \
+      && ok "status reports cli.hang_suspected" || bad "status does not report the hang"
+    FPROTON_STATE_DIR="$BDIR" "$BIN" status --json | jq -e '[.warnings[].id] | index("cli_hang_suspected") != null' >/dev/null \
+      && ok "status carries the cli_hang_suspected warning" || bad "the warning is missing"
 
-  # reconnect needs a previous target: seed one in this case's own state dir.
-  RDIR="$RUN_DIR/amber-reconnect"; mkdir -p "$RDIR"
-  printf '{"recents":["CH"]}' > "$RDIR/state.json"
-  start=$(date +%s%N)
-  out="$(FPROTON_STATE_DIR="$RDIR" "$BIN" reconnect --timeout 3 --json 2>&1)"; code=$?
-  end=$(date +%s%N); ms=$(( (end-start)/1000000 ))
-  if [[ "$code" == 5 ]] && (( ms >= 2500 && ms <= 8000 )); then
-    ok "reconnect — exit 5 upstream after ${ms} ms"
-  else
-    bad "reconnect — exit $code in ${ms} ms" "${out:0:200}"
-  fi
-
-  head_ "AMBER: the 60 s backoff answers the second call (§2)"
-  BDIR="$RUN_DIR/backoff"; mkdir -p "$BDIR"
-  FPROTON_STATE_DIR="$BDIR" "$BIN" account --timeout 3 --json >/dev/null 2>&1
-  start=$(date +%s%N)
-  out="$(FPROTON_STATE_DIR="$BDIR" "$BIN" account --timeout 3 --json 2>&1)"; code=$?
-  end=$(date +%s%N); ms=$(( (end-start)/1000000 ))
-  if [[ "$code" == 5 ]] && (( ms < 1000 )); then
-    ok "the second call exits 5 in ${ms} ms without spawning the CLI (backoff)"
-  else
-    bad "the backoff did not short-circuit: exit $code in ${ms} ms" "${out:0:200}"
-  fi
-  FPROTON_STATE_DIR="$BDIR" "$BIN" status --json | jq -e '.cli.hang_suspected == true' >/dev/null \
-    && ok "status reports cli.hang_suspected" || bad "status does not report the hang"
-  FPROTON_STATE_DIR="$BDIR" "$BIN" status --json | jq -e '[.warnings[].id] | index("cli_hang_suspected") != null' >/dev/null \
-    && ok "status carries the cli_hang_suspected warning" || bad "the warning is missing"
-
-  head_ "AMBER: one case at the un-overridden 15 s probe deadline"
-  PDIR="$RUN_DIR/probe-default"; mkdir -p "$PDIR"
-  start=$(date +%s%N)
-  out="$(FPROTON_STATE_DIR="$PDIR" "$BIN" account --json 2>&1)"; code=$?
-  end=$(date +%s%N); ms=$(( (end-start)/1000000 ))
-  if [[ "$code" == 5 ]] && (( ms >= 14000 && ms <= 20000 )); then
-    ok "account at the default probe deadline — exit 5 after ${ms} ms"
-  else
-    bad "account at the default deadline — exit $code in ${ms} ms" "${out:0:200}"
+    head_ "AMBER: one case at the un-overridden 15 s probe deadline"
+    PDIR="$RUN_DIR/probe-default"; mkdir -p "$PDIR"
+    start=$(date +%s%N)
+    out="$(FPROTON_STATE_DIR="$PDIR" "$BIN" account --json 2>&1)"; code=$?
+    end=$(date +%s%N); ms=$(( (end-start)/1000000 ))
+    if [[ "$code" == 5 ]] && (( ms >= 14000 && ms <= 20000 )); then
+      ok "account at the default probe deadline — exit 5 after ${ms} ms"
+    else
+      bad "account at the default deadline — exit $code in ${ms} ms" "${out:0:200}"
+    fi
   fi
 
   head_ "RED: the doctor's connected-group checks"
@@ -367,12 +390,15 @@ if [[ "$MODE" == "full" ]]; then
   # its exit code says nothing about whether it ran. Judge it by its output instead.
   DOC_JSON="$("$BIN" doctor --json 2>/dev/null)"
   if jq -e '.checks | length > 0' >/dev/null 2>&1 <<<"$DOC_JSON"; then
+    # With a tunnel up both checks run for real and must pass; without one they must
+    # report skip:link_down rather than a pass they could not have earned.
+    want="skip"; "$BIN" status --json 2>/dev/null | jq -e '.link.up == true' >/dev/null 2>&1 && want="pass"
     for check in dns_when_connected tunnel_route_ok; do
       status="$(jq -r --arg c "$check" '[.checks[] | select(.id==$c) | .status] | first // "absent"' <<<"$DOC_JSON")"
-      if [[ "$status" == "skip" ]]; then
-        ok "doctor reports $check as skip while proton0 is down"
+      if [[ "$status" == "$want" ]]; then
+        ok "doctor reports $check as $want (link up: $([[ $want == pass ]] && echo yes || echo no))"
       else
-        bad "doctor reports $check as '$status', expected skip (§4b RED)"
+        bad "doctor reports $check as '$status', expected $want"
       fi
     done
   else

@@ -128,21 +128,20 @@ and never a zero standing in for unknown.
 
 ## Status
 
-The Proton CLI cannot answer on this machine until the keyring is repaired, so the project
-tracks what is verifiable here in three classes. Nothing in the RED row is claimed to work,
-in this README, in `--help`, or in `robot-docs`.
+Verified on the owner's machine on 2026-09-15, after the keyring repair (a reboot) and a
+sign-in. Until then the Proton CLI hung on every session command, which is why the project
+tracks every command in one of three classes. The evidence for each row is the
+"first connect after the keyring repair" entry at the end of `DECISIONS.md`.
 
 | Class | Meaning | Commands |
 |---|---|---|
-| GREEN | verifiable end to end here, today | `status`, `servers`, `countries`, `cities`, `index`, `settings`, `history`, `recents`, `capabilities`, `robot-docs`, `version`, `setup --dry-run`, `tui`, `doctor`, `disconnect --force` (nmcli only), `port` error path, `signin` argument validation |
-| AMBER | only the timeout and error path is verifiable | `connect`, `disconnect` (without `--force`), `reconnect`, `config list\|get\|set`, `account`, `signout`. The e2e suite asserts exit 5, `code_name: upstream`, a hint, and a wall clock between 2.5 s and 8 s under `--timeout 3` |
-| RED | cannot be verified at all today | `connect`/`reconnect` success, `port` success, every `wg` subcommand, and the doctor's `dns_when_connected` and `tunnel_route_ok` checks, which report `skip:link_down` while `proton0` is absent |
+| GREEN | verified end to end here | `status`, `servers`, `countries`, `cities`, `index`, `settings`, `history`, `recents`, `capabilities`, `robot-docs`, `version`, `setup`, `tui`, `doctor` (26/26 pass while connected, including `dns_when_connected` and `tunnel_route_ok`), `signin`, `account`, `config list\|get\|set`, `connect` (CH#507 in 1.8 s), `disconnect` (0.9 s), `disconnect --force`, `reconnect` (1.6 s), `port` error path (exit 5 with the hint to turn port forwarding on) |
+| AMBER | exercised only on its error or timeout path | `signout` (never run; it would end the session), the 60 s CLI-hang backoff and the deadline kills, which the e2e suite still asserts under `--timeout 3` |
+| RED | not verified | `port` success (port forwarding is off in the owner's config), every `wg` subcommand (env-gated experiment, see `DESIGN.md` §4 for its kill criterion) |
 
 `fproton capabilities` carries `build_stage` and `build_note` for the build you actually
-have; read those before trusting anything above. The matrix with the evidence for each row
-is the "§4b verification matrix (v0.1-integrated)" section at the end of `DECISIONS.md` —
-the earlier Phase-1b matrix in that file describes a build in which `tui` and `doctor` were
-still stubs, and is kept only because the log is append-only.
+have. Before the repair, the e2e suite proved the other half of the design: a wedged CLI
+yields exit 5 and a runnable hint within the deadline instead of a hang.
 
 ## The widget
 
