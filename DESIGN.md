@@ -730,7 +730,9 @@ Checks (group · class · detection command · verdict rule):
   connection down pvpn-killswitch-ipv6` (inverse `up`); the confirmation names it as a leak
   guard. This is the only fproton mutation that can expose traffic.
 - `serverlist_present` (cache, D: exists, parses, ≥ 1 000 logicals), `serverlist_expired`
-  (cache, D: `ExpirationTime` past → `warn`), `serverlist_loads_stale` (cache, D → `info`).
+  (cache, D: `warn` only when `ExpirationTime` is more than 24 h past — a few hours past is the
+  normal state between connects and passes with a note), `serverlist_loads_stale` (cache, D:
+  always `pass` with the staleness in the detail; loads refresh only while Proton's client runs).
 - `index_fresh` (cache, A: snapshot missing or older than the JSON → fix: rebuild).
 - `state_dir` (install, A), `stale_pending_action` (install, A: pending older than its
   deadline → fix: clear), `settings_valid` (install, A).

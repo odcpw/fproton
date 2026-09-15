@@ -1,1 +1,1 @@
-{"check":"serverlist_expired","status":"warn","reason":"expired","fixable":false,"detail_contains":["expired"]}
+{"check": "serverlist_expired", "status": "warn", "reason": "expired", "fixable": false, "detail_contains": ["expired", "only the CLI can refresh it"]}

@@ -946,7 +946,16 @@ fn serverlist_expired(p: &Probes) -> Verdict {
     if age <= 0 {
         return Verdict::pass(format!("valid for another {} min", (-age) / 60));
     }
-    // An expired list is served, not refused (§4 `index`).
+    // Proton's client refreshes the list at every connect, so a list a few hours past
+    // its expiry is the normal state between connects. An expired list is served, not
+    // refused (§4 `index`); only a day-old one is worth a warning.
+    if age <= 86_400 {
+        return Verdict::pass(format!(
+            "expired {} h {} min ago; still served, and the next connect refreshes it",
+            age / 3600,
+            (age % 3600) / 60
+        ));
+    }
     Verdict::warn(
         "expired",
         format!(
@@ -969,10 +978,11 @@ fn serverlist_loads_stale(p: &Probes) -> Verdict {
     if age <= 0 {
         return Verdict::pass(format!("loads current for another {} min", (-age) / 60));
     }
-    Verdict::warn(
-        "loads_stale",
+    // Normal between connects: Proton's client refreshes loads only while it runs.
+    // Information, never a finding.
+    Verdict::pass(
         format!(
-            "per-server loads went stale {} h ago; `load` columns are last known, not live",
+            "per-server loads went stale {} h ago; `load` columns are last known, refreshed by the next connect",
             age / 3600
         ),
     )

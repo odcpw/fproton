@@ -738,12 +738,26 @@ pub fn status(ctx: &Context) -> Result<Status, Error> {
             "fproton index --rebuild",
         )),
         crate::index::Freshness::Fresh => {
-            if s.index.loads_expired == Some(true) {
+            // Expired *loads* are not worth a row: Proton's client only refreshes them
+            // while it runs, i.e. at each connect, so they are stale most of the time and
+            // `index.loads_expired` is there for UIs that want to grey the numbers. The
+            // *list* is worth a word only once it is a day past its own expiry — servers
+            // rarely change, and the next connect refreshes it anyway.
+            let list_expired_for = s
+                .index
+                .serverlist_expires_at
+                .as_deref()
+                .and_then(state::seconds_since)
+                .unwrap_or(0);
+            if list_expired_for > 86_400 {
                 s.warnings.push(warn(
                     "serverlist_stale",
                     Severity::Info,
-                    "the server loads in Proton's list have expired; they are shown as last seen",
-                    "fproton index --rebuild",
+                    format!(
+                        "Proton's server list expired {} h ago; the Proton client refreshes it when it connects",
+                        list_expired_for / 3600
+                    ),
+                    "fproton reconnect",
                 ));
             }
         }
@@ -848,7 +862,12 @@ pub fn status(ctx: &Context) -> Result<Status, Error> {
         State::Disconnected => vec![format!("fproton connect {}", ctx.settings.default_target)],
         State::Error => vec!["fproton doctor".to_string()],
     };
-    if s.warnings.iter().any(|w| w.id == "serverlist_stale") {
+    // Only the stale-snapshot flavour of `serverlist_stale` is fixed by a rebuild; the
+    // day-old-list flavour carries `fproton reconnect` as its own hint.
+    if s.warnings
+        .iter()
+        .any(|w| w.id == "serverlist_stale" && w.hint == "fproton index --rebuild")
+    {
         s.commands.push("fproton index --rebuild".to_string());
     }
     if s.signed_in == Some(false) {

@@ -1,0 +1,1 @@
+{"check": "serverlist_expired", "status": "pass", "reason": null, "fixable": false, "detail_contains": ["next connect refreshes it"]}
