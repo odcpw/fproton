@@ -1,58 +1,63 @@
-//! Colors from the active Omarchy theme (~/.local/state/omarchy/current/theme/colors.toml),
-//! with a neutral fallback when not on Omarchy.
-//!
-//! Copied from `~/Projects/odcpw/fbittorrent/src/tui/theme.rs` (the sibling project this
-//! repo copies its conventions from, DESIGN.md §7a) and extended with [`Theme::state`],
-//! the one fproton-specific style: the §5 state badge. No literal colour is written
-//! anywhere else in `src/tui/**`.
+//! Terminal colors and emphasis derived from the active Omarchy theme.
 
 use ftui::{PackedRgba, Style};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct Theme {
+    pub bg: PackedRgba,
+    pub panel: PackedRgba,
+    pub rule: PackedRgba,
     pub fg: PackedRgba,
     pub dim: PackedRgba,
     pub accent: PackedRgba,
     pub selection: PackedRgba,
-    pub muted: PackedRgba,
     pub red: PackedRgba,
     pub green: PackedRgba,
     pub yellow: PackedRgba,
-    pub blue: PackedRgba,
-    pub cyan: PackedRgba,
-    pub magenta: PackedRgba,
     pub name: String,
+}
+
+fn mix(base: PackedRgba, ink: PackedRgba, percent: u16) -> PackedRgba {
+    let channel =
+        |a: u8, b: u8| ((u16::from(a) * (100 - percent) + u16::from(b) * percent) / 100) as u8;
+    PackedRgba::rgb(
+        channel(base.r(), ink.r()),
+        channel(base.g(), ink.g()),
+        channel(base.b(), ink.b()),
+    )
 }
 
 impl Default for Theme {
     fn default() -> Self {
+        let bg = PackedRgba::rgb(0x11, 0x1a, 0x17);
+        let fg = PackedRgba::rgb(0xe4, 0xe9, 0xdc);
+        let accent = PackedRgba::rgb(0xaf, 0xd2, 0xa4);
         Self {
-            fg: PackedRgba::rgb(0xca, 0xcc, 0xcc),
-            dim: PackedRgba::rgb(0x70, 0x78, 0x80),
-            accent: PackedRgba::rgb(0xca, 0xcc, 0xcc),
-            selection: PackedRgba::rgb(0x2a, 0x2e, 0x33),
-            muted: PackedRgba::rgb(0x70, 0x78, 0x80),
+            bg,
+            fg,
+            accent,
+            panel: mix(bg, fg, 6),
+            dim: mix(bg, fg, 68),
+            rule: mix(bg, fg, 27),
+            selection: mix(bg, accent, 24),
             red: PackedRgba::rgb(0xa5, 0x55, 0x55),
             green: PackedRgba::rgb(0x8a, 0xa8, 0x72),
             yellow: PackedRgba::rgb(0xc9, 0xa5, 0x54),
-            blue: PackedRgba::rgb(0x6c, 0x8e, 0xbf),
-            cyan: PackedRgba::rgb(0x6f, 0xa8, 0xa8),
-            magenta: PackedRgba::rgb(0xa0, 0x7a, 0xb0),
             name: "default".into(),
         }
     }
 }
 
 pub fn colors_path() -> PathBuf {
-    dirs::home_dir()
+    dirs::state_dir()
         .unwrap_or_default()
-        .join(".local/state/omarchy/current/theme/colors.toml")
+        .join("omarchy/current/theme/colors.toml")
 }
 
 pub fn parse_hex(s: &str) -> Option<PackedRgba> {
     let h = s.trim().trim_start_matches('#');
-    if h.len() < 6 {
+    if h.len() < 6 || !h.is_ascii() {
         return None;
     }
     let r = u8::from_str_radix(&h[0..2], 16).ok()?;
@@ -63,6 +68,22 @@ pub fn parse_hex(s: &str) -> Option<PackedRgba> {
 
 impl Theme {
     pub fn load() -> Self {
+        if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+            let c = PackedRgba::TRANSPARENT;
+            return Self {
+                bg: c,
+                fg: c,
+                panel: c,
+                rule: c,
+                dim: c,
+                accent: c,
+                selection: c,
+                red: c,
+                green: c,
+                yellow: c,
+                name: "terminal".into(),
+            };
+        }
         let mut t = Theme::default();
         let Ok(raw) = std::fs::read_to_string(colors_path()) else {
             return t;
@@ -77,16 +98,13 @@ impl Theme {
         if let Some(c) = get("accent") {
             t.accent = c;
         }
-        if let Some(c) = get("selection") {
-            t.selection = c;
+        if let Some(c) = get("background") {
+            t.bg = c;
         }
-        if let Some(c) = get("muted") {
-            t.muted = c;
-            t.dim = c;
-        }
-        if let Some(c) = get("dark_foreground") {
-            t.dim = c;
-        }
+        t.panel = mix(t.bg, t.fg, 6);
+        t.dim = mix(t.bg, t.fg, 68);
+        t.rule = mix(t.bg, t.fg, 27);
+        t.selection = mix(t.bg, t.accent, 24);
         if let Some(c) = get("red") {
             t.red = c;
         }
@@ -95,15 +113,6 @@ impl Theme {
         }
         if let Some(c) = get("yellow") {
             t.yellow = c;
-        }
-        if let Some(c) = get("blue") {
-            t.blue = c;
-        }
-        if let Some(c) = get("cyan") {
-            t.cyan = c;
-        }
-        if let Some(c) = get("magenta") {
-            t.magenta = c;
         }
         t.name = std::fs::read_link(colors_path().parent().unwrap())
             .ok()
@@ -122,10 +131,19 @@ impl Theme {
         Style::new().fg(self.accent).bold()
     }
     pub fn selected(&self) -> Style {
+        if self.bg == PackedRgba::TRANSPARENT {
+            return Style::new().reverse().bold();
+        }
         Style::new().bg(self.selection).fg(self.fg).bold()
     }
+    pub fn cursor(&self) -> Style {
+        if self.bg == PackedRgba::TRANSPARENT {
+            return Style::new().reverse();
+        }
+        Style::new().bg(self.accent).fg(self.bg)
+    }
     pub fn border(&self) -> Style {
-        Style::new().fg(self.dim)
+        Style::new().fg(self.rule)
     }
     pub fn border_focused(&self) -> Style {
         Style::new().fg(self.accent)

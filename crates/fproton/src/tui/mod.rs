@@ -21,8 +21,9 @@ use ftui::runtime::{Every, SubId, Subscription};
 use ftui::widgets::input::TextInput;
 use ftui::widgets::table::TableState;
 use ftui::widgets::virtualized::VirtualizedListState;
-use ftui::widgets::TabsState;
-use ftui::{App, Cmd, Event, KeyCode, KeyEvent, KeyEventKind, Model, Modifiers, Style};
+use ftui::{
+    App, Cmd, Event, KeyCode, KeyEvent, KeyEventKind, Model, Modifiers, MouseButton, MouseEventKind,
+};
 
 use fproton_core::index::{Feature, Query, Sort, Tier};
 use fproton_core::state::HistoryEntry;
@@ -150,7 +151,8 @@ pub struct Tui {
     theme: Theme,
     theme_mtime: Option<SystemTime>,
     screen: Screen,
-    tabs: RefCell<TabsState>,
+    help_rect: std::cell::Cell<ftui::layout::Rect>,
+    tab_rects: std::cell::Cell<[ftui::layout::Rect; 3]>,
     show_help: bool,
     tick: usize,
 
@@ -196,7 +198,7 @@ pub fn run(args: TuiArgs, ctx: Context) -> anyhow::Result<i32> {
     // connect child group), so the teardown cannot race the connect it is cleaning up.
     let owed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let app = Tui::new(args.screen(), ctx.clone(), exit.clone(), owed.clone());
-    App::fullscreen(app).run()?;
+    App::fullscreen(app).with_mouse().run()?;
     if owed.load(Ordering::SeqCst) {
         // nmcli only, and bounded by the disconnect deadline like every other spawn.
         let _ = engine::disconnect(&ctx, true, &fproton_core::CancelToken::new());
@@ -215,7 +217,7 @@ impl Tui {
         let filter = TextInput::new()
             .with_placeholder("filter by name, country or city")
             .with_style(theme.text())
-            .with_cursor_style(Style::new().bg(theme.accent).fg(theme.selection));
+            .with_cursor_style(theme.cursor());
         Tui {
             ctx,
             exit,
@@ -225,10 +227,8 @@ impl Tui {
                 .ok(),
             theme,
             screen,
-            tabs: RefCell::new(TabsState {
-                active: screen.index(),
-                offset: 0,
-            }),
+            help_rect: Default::default(),
+            tab_rects: Default::default(),
             show_help: false,
             tick: 0,
             status: None,
@@ -423,7 +423,7 @@ impl Tui {
             let mut input = TextInput::new()
                 .with_placeholder("filter by name, country or city")
                 .with_style(self.theme.text())
-                .with_cursor_style(Style::new().bg(self.theme.accent).fg(self.theme.selection))
+                .with_cursor_style(self.theme.cursor())
                 .with_value(value);
             input.set_focused(focused);
             self.filter = input;
@@ -432,7 +432,6 @@ impl Tui {
 
     fn set_screen(&mut self, s: Screen) -> Cmd<Msg> {
         self.screen = s;
-        self.tabs.borrow_mut().active = s.index();
         match s {
             Screen::Servers if !self.servers_loaded => self.load_servers(),
             Screen::History if self.history.is_empty() && self.history_err.is_none() => {
@@ -746,6 +745,21 @@ impl Model for Tui {
     fn update(&mut self, msg: Msg) -> Cmd<Msg> {
         match msg {
             Msg::Raw(Event::Key(k)) => self.on_key(k),
+            Msg::Raw(Event::Mouse(ev)) if ev.kind == MouseEventKind::Down(MouseButton::Left) => {
+                if self.show_help {
+                    self.show_help = false;
+                } else if self.help_rect.get().contains(ev.x, ev.y) {
+                    self.show_help = true;
+                } else if let Some(index) = self
+                    .tab_rects
+                    .get()
+                    .iter()
+                    .position(|r| r.contains(ev.x, ev.y))
+                {
+                    return self.set_screen(Screen::from_index(index));
+                }
+                Cmd::none()
+            }
             Msg::Raw(_) => Cmd::none(),
             Msg::Poll => {
                 self.maybe_reload_theme();
@@ -924,6 +938,41 @@ mod tests {
     }
 
     #[test]
+    fn clicking_navigation_after_resize_follows_the_drawn_labels() {
+        let mut m = model();
+        let click = |x, y| {
+            Msg::Raw(Event::Mouse(ftui::MouseEvent::new(
+                MouseEventKind::Down(MouseButton::Left),
+                x,
+                y,
+            )))
+        };
+        for (w, h, word, screen) in [
+            (120, 34, "History", Screen::History),
+            (40, 16, "2", Screen::Servers),
+        ] {
+            let rows = render(&m, w, h);
+            let (y, (line, byte)) = rows
+                .iter()
+                .enumerate()
+                .find_map(|(y, line)| line.find(word).map(|byte| (y, (line, byte))))
+                .unwrap();
+            let x = unicode_width::UnicodeWidthStr::width(&line[..byte]) as u16;
+            m.update(click(x, y as u16));
+            assert_eq!(m.screen, screen);
+            let footer = &rows[h as usize - 1];
+            let byte = footer.find("? help").unwrap();
+            m.update(click(
+                unicode_width::UnicodeWidthStr::width(&footer[..byte]) as u16,
+                h - 1,
+            ));
+            assert!(m.show_help);
+            m.update(click(x, y as u16));
+            assert!(!m.show_help);
+        }
+    }
+
+    #[test]
     fn the_medium_tier_drops_the_sparkline_but_keeps_the_badge() {
         let m = model();
         let text = screen_text(&m, 80, 24);
@@ -962,7 +1011,6 @@ mod tests {
         for screen in [Screen::Status, Screen::Servers, Screen::History] {
             let mut m = model();
             m.screen = screen;
-            m.tabs.borrow_mut().active = screen.index();
             m.servers_loaded = true;
             m.servers_err = Some(ServersError {
                 code_name: "index".into(),
@@ -1066,7 +1114,7 @@ mod tests {
             hint: "sudo tailscale down".into(),
         });
         m.status = Some(status);
-        for (w, h) in [(80u16, 24u16), (99, 30), (120, 40)] {
+        for (w, h) in [(64u16, 16u16), (80, 24), (99, 30), (120, 40)] {
             let text = screen_text(&m, w, h);
             assert!(
                 text.contains("Warnings"),
@@ -1112,7 +1160,6 @@ mod tests {
         // the required line never appeared.
         let mut m = model();
         m.screen = Screen::Servers;
-        m.tabs.borrow_mut().active = Screen::Servers.index();
         m.servers_loaded = true;
         m.servers_err = Some(ServersError {
             code_name: "index".into(),

@@ -3,16 +3,17 @@
 //! never leaves a screen blank — each empty, error and hang state has its own text.
 
 use ftui::layout::{Constraint, Flex, Rect, Sides};
+use ftui::render::cell::Cell;
 use ftui::text::wrap::WrapMode;
 use ftui::text::{Line, Span, Text};
 use ftui::widgets::block::Block;
-use ftui::widgets::borders::BorderType;
+use ftui::widgets::borders::Borders;
 use ftui::widgets::paragraph::Paragraph;
 use ftui::widgets::progress::{MiniBar, MiniBarColors};
 use ftui::widgets::sparkline::Sparkline;
 use ftui::widgets::table::{Row as TableRow, Table};
 use ftui::widgets::virtualized::{RenderItem, VirtualizedList};
-use ftui::widgets::{StatefulWidget, StatusItem, StatusLine, Tab, Tabs, Widget};
+use ftui::widgets::{StatefulWidget, Widget};
 use ftui::{Frame, Style};
 use unicode_width::UnicodeWidthStr;
 
@@ -44,10 +45,13 @@ pub(super) fn tier_of(b: Rect) -> Tier {
 
 pub(super) fn view(m: &Tui, frame: &mut Frame) {
     let b = frame.bounds();
+    m.tab_rects.set(Default::default());
+    m.help_rect.set(Rect::default());
     if b.width == 0 || b.height == 0 {
         return;
     }
     let th = &m.theme;
+    frame.buffer.fill(b, Cell::from_char(' ').with_bg(th.bg));
     if b.width < 30 || b.height < 8 {
         // One line when it fits; wrapped rather than cut when the terminal is
         // narrower than the sentence, so the size it needs stays readable.
@@ -58,10 +62,26 @@ pub(super) fn view(m: &Tui, frame: &mut Frame) {
         return;
     }
     let tier = tier_of(b);
+    let header_height = if b.height >= 27 { 3 } else { 1 };
     let rows = Flex::vertical()
-        .constraints([Constraint::Fixed(1), Constraint::Fill, Constraint::Fixed(1)])
+        .constraints([
+            Constraint::Fixed(header_height),
+            Constraint::Fill,
+            Constraint::Fixed(1),
+        ])
         .split(b);
-    view_tabs(m, rows[0], frame, tier);
+    frame
+        .buffer
+        .fill(rows[0], Cell::from_char(' ').with_bg(th.panel));
+    frame
+        .buffer
+        .fill(rows[2], Cell::from_char(' ').with_bg(th.panel));
+    view_tabs(
+        m,
+        Rect::new(b.x, b.y + header_height / 2, b.width, 1),
+        frame,
+        tier,
+    );
     match (tier, m.screen) {
         (Tier::Narrow, _) => {
             let inner = Flex::vertical()
@@ -87,73 +107,67 @@ pub(super) fn view(m: &Tui, frame: &mut Frame) {
 
 fn view_tabs(m: &Tui, area: Rect, frame: &mut Frame, tier: Tier) {
     let th = &m.theme;
-    if tier == Tier::Narrow {
-        let mut spans = Vec::new();
-        for (i, label) in ["1", "2", "3"].iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled("·", th.dimmed()));
-            }
-            let active = i == m.screen.index();
-            spans.push(Span::styled(
-                (*label).to_string(),
-                if active { th.accented() } else { th.dimmed() },
-            ));
+    let gutter = if area.width < 45 { 1 } else { 3 };
+    let mut x = area.x + gutter;
+    let mut label = |s: &str, style| {
+        let w = (s.width() as u16).min(area.right().saturating_sub(x));
+        let rect = Rect::new(x, area.y, w, 1);
+        Paragraph::new(s).style(style).render(rect, frame);
+        x += w;
+        rect
+    };
+    label("▥  FPROTON  ", th.key());
+    let compact = tier == Tier::Narrow;
+    let mut tabs = [Rect::default(); 3];
+    for (i, tab) in tabs.iter_mut().enumerate() {
+        let screen = Screen::from_index(i);
+        let active = m.screen == screen;
+        if compact && i > 0 {
+            label("·", th.dimmed());
         }
-        spans.push(Span::styled(
-            format!("  {}", screen_name(m.screen)),
-            th.title(),
-        ));
-        Paragraph::new(Text::from_line(Line::from_spans(spans)))
-            .wrap(WrapMode::None)
-            .render(area, frame);
-        return;
+        let name = if compact {
+            (i + 1).to_string()
+        } else {
+            format!(
+                "{}{} {}  ",
+                if active { "▌ " } else { "  " },
+                i + 1,
+                screen_name(screen)
+            )
+        };
+        *tab = label(&name, if active { th.selected() } else { th.dimmed() });
     }
-
-    let cols = Flex::horizontal()
-        .constraints([Constraint::Fill, Constraint::FitContent])
-        .split(area);
-    let tabs = Tabs::new([
-        Tab::new(" 1 Status "),
-        Tab::new(" 2 Servers "),
-        Tab::new(" 3 History "),
-    ])
-    .style(th.dimmed())
-    .active_style(th.selected())
-    .separator("");
-    StatefulWidget::render(&tabs, cols[0], frame, &mut m.tabs.borrow_mut());
-
-    let mut spans = Vec::new();
-    if m.poll_inflight || m.action.is_some() {
-        spans.push(Span::styled(
-            format!("{} ", SPINNER[m.tick % SPINNER.len()]),
-            th.dimmed(),
-        ));
+    m.tab_rects.set(tabs);
+    if compact {
+        label(&format!("  {}", screen_name(m.screen)), th.title());
+    } else {
+        let busy = if m.poll_inflight || m.action.is_some() {
+            SPINNER[m.tick % SPINNER.len()]
+        } else {
+            ""
+        };
+        let engine = m.status.as_ref().map_or("", |s| s.engine.as_str());
+        let detail = format!("{busy} {engine}  {}", th.name);
+        let w = detail.width() as u16;
+        if x + w + gutter < area.right() {
+            Paragraph::new(detail)
+                .style(th.dimmed())
+                .render(Rect::new(area.right() - w - gutter, area.y, w, 1), frame);
+        }
     }
-    if let Some(s) = &m.status {
-        spans.push(Span::styled(format!("{} ", s.engine), th.dimmed()));
-    }
-    spans.push(Span::styled(format!("{} ", th.name), th.dimmed()));
-    let line = Line::from_spans(spans);
-    let w = line.width() as u16;
-    let r = Rect::new(
-        area.x + area.width.saturating_sub(w + 1),
-        area.y,
-        w.min(area.width),
-        1,
-    );
-    Paragraph::new(Text::from_line(line))
-        .wrap(WrapMode::None)
-        .render(r, frame);
 }
 
 fn view_status_line(m: &Tui, area: Rect, frame: &mut Frame) {
     let th = &m.theme;
-    StatusLine::new()
-        .style(th.dimmed())
-        .right(StatusItem::key_hint("?", "help"))
-        .render(area, frame);
+    let help = Rect::new(area.right().saturating_sub(8), area.y, 8.min(area.width), 1);
+    m.help_rect.set(help);
+    Paragraph::new(Text::from_line(Line::from_spans([
+        Span::styled("? ", th.key()),
+        Span::styled("help", th.text()),
+    ])))
+    .render(help, frame);
 
-    let state = m.status.as_ref().map_or("disconnected", |s| s.state.name());
+    let state = m.status.as_ref().map_or("unknown", |s| s.state.name());
     let mut spans = vec![
         Span::styled("●", th.state(state)),
         Span::styled(format!(" {state} "), th.text()),
@@ -212,13 +226,16 @@ fn status_screen(m: &Tui, area: Rect, frame: &mut Frame, tier: Tier) {
     }
     if tier == Tier::Wide {
         let cols = Flex::horizontal()
-            .constraints([Constraint::Percentage(54.0), Constraint::Fill])
+            .constraints([Constraint::Percentage(60.0), Constraint::Fill])
             .split(area);
         let left = Flex::vertical()
             .constraints([Constraint::Fill, Constraint::Fixed(9)])
             .split(cols[0]);
         hero(m, left[0], frame);
         traffic(m, left[1], frame, true);
+        frame
+            .buffer
+            .fill(cols[1], Cell::from_char(' ').with_bg(m.theme.panel));
         let right = Flex::vertical()
             .constraints([Constraint::Fixed(8), Constraint::Fill, Constraint::Fixed(3)])
             .split(cols[1]);
@@ -235,9 +252,18 @@ fn status_screen(m: &Tui, area: Rect, frame: &mut Frame, tier: Tier) {
         // A 24-row terminal leaves 22 rows for five panels, so the fixed slots shrink
         // rather than one panel disappearing: a `warn` the user cannot see is worse
         // than a Protections panel with one line fewer.
-        let tight = area.height < 25;
+        let tight = area.height < 28;
         let rows = Flex::vertical()
-            .constraints(if tight {
+            .constraints(if area.height < 22 {
+                // Reserve a complete warning row even on the shortest status tile.
+                [
+                    Constraint::Fixed(5),
+                    Constraint::Fixed(3),
+                    Constraint::Fixed(3),
+                    Constraint::Fill,
+                    Constraint::Fixed(if area.height >= 17 { 3 } else { 0 }),
+                ]
+            } else if tight {
                 [
                     Constraint::Fixed(8),
                     Constraint::Fixed(3),
@@ -263,16 +289,18 @@ fn status_screen(m: &Tui, area: Rect, frame: &mut Frame, tier: Tier) {
     }
 }
 
-fn panel<'a>(th: &Theme, title: &'a str, focused: bool) -> Block<'a> {
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(if focused {
-            th.border_focused()
-        } else {
-            th.border()
-        })
-        .title(title)
-        .padding(Sides::horizontal(1))
+fn section(th: &Theme, title: &str, title_style: Style, area: Rect, frame: &mut Frame) -> Rect {
+    let block = Block::new()
+        .borders(Borders::TOP)
+        .border_style(th.border())
+        .padding(Sides::new(0, 2, 1, 2));
+    let inner = block.inner(area);
+    block.render(area, frame);
+    let width = (title.width() as u16).min(area.width.saturating_sub(2));
+    Paragraph::new(title)
+        .style(title_style)
+        .render(Rect::new(area.x + 1, area.y, width, 1), frame);
+    inner
 }
 
 fn hero(m: &Tui, area: Rect, frame: &mut Frame) {
@@ -280,19 +308,15 @@ fn hero(m: &Tui, area: Rect, frame: &mut Frame) {
         return;
     }
     let th = &m.theme;
-    let state = m.status.as_ref().map_or("disconnected", |s| s.state.name());
+    let state = m.status.as_ref().map_or("unknown", |s| s.state.name());
     let is_error = state == "error" || m.status_err.is_some();
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(if is_error {
-            th.err()
-        } else {
-            th.border_focused()
-        })
-        .title(" Proton VPN ")
-        .padding(Sides::horizontal(1));
-    let inner = block.inner(area);
-    block.render(area, frame);
+    let inner = section(
+        th,
+        " Proton VPN ",
+        if is_error { th.err() } else { th.accented() },
+        area,
+        frame,
+    );
     if inner.height == 0 {
         return;
     }
@@ -426,9 +450,7 @@ fn traffic(m: &Tui, area: Rect, frame: &mut Frame, sparkline: bool) {
         return;
     }
     let th = &m.theme;
-    let block = panel(th, " Traffic ", false);
-    let inner = block.inner(area);
-    block.render(area, frame);
+    let inner = section(th, " Traffic ", th.title(), area, frame);
     if inner.height == 0 {
         return;
     }
@@ -475,9 +497,7 @@ fn protections(m: &Tui, area: Rect, frame: &mut Frame) {
         return;
     }
     let th = &m.theme;
-    let block = panel(th, " Protections ", false);
-    let inner = block.inner(area);
-    block.render(area, frame);
+    let inner = section(th, " Protections ", th.title(), area, frame);
     if inner.height == 0 {
         return;
     }
@@ -556,9 +576,7 @@ fn warnings(m: &Tui, area: Rect, frame: &mut Frame) {
         return;
     }
     let th = &m.theme;
-    let block = panel(th, " Warnings ", false);
-    let inner = block.inner(area);
-    block.render(area, frame);
+    let inner = section(th, " Warnings ", th.title(), area, frame);
     if inner.height == 0 {
         return;
     }
@@ -604,9 +622,7 @@ fn recents(m: &Tui, area: Rect, frame: &mut Frame) {
         return;
     }
     let th = &m.theme;
-    let block = panel(th, " Recents ", false);
-    let inner = block.inner(area);
-    block.render(area, frame);
+    let inner = section(th, " Recents ", th.title(), area, frame);
     if inner.height == 0 {
         return;
     }
@@ -716,6 +732,15 @@ struct ServerItem<'a> {
 impl RenderItem for ServerItem<'_> {
     fn render(&self, area: Rect, frame: &mut Frame, selected: bool, _skip_rows: u16) {
         let th = self.th;
+        Paragraph::new(if selected { "▌" } else { " " })
+            .style(th.key())
+            .render(Rect::new(area.x, area.y, 1, 1), frame);
+        let area = Rect::new(
+            area.x + 2,
+            area.y,
+            area.width.saturating_sub(2),
+            area.height,
+        );
         let c = self.cols;
         let r = self.row;
         let bar = MiniBar::new(f64::from(r.load) / 100.0, c.load.saturating_sub(5) as u16);
@@ -797,9 +822,7 @@ fn servers_screen(m: &Tui, area: Rect, frame: &mut Frame) {
         .map(|n| n.to_string())
         .unwrap_or_else(|| "?".into());
     let title = format!(" Servers  {}/{} shown ", m.servers.len(), total);
-    let block = panel(th, &title, true);
-    let inner = block.inner(area);
-    block.render(area, frame);
+    let inner = section(th, &title, th.accented(), area, frame);
     if inner.height < 3 {
         return;
     }
@@ -843,9 +866,9 @@ fn servers_screen(m: &Tui, area: Rect, frame: &mut Frame) {
             frame,
         );
 
-    let c = cols_for(rows[1].width);
+    let c = cols_for(rows[1].width.saturating_sub(2));
     let header = format!(
-        "{} {} {} {} {:>score$} {:<tier$} {}",
+        "  {} {} {} {} {:>score$} {:<tier$} {}",
         fit("NAME", c.name),
         fit("COUNTRY", c.country),
         fit("CITY", c.city),
@@ -911,9 +934,7 @@ fn history_screen(m: &Tui, area: Rect, frame: &mut Frame) {
     }
     let th = &m.theme;
     if let Some(e) = &m.history_err {
-        let block = panel(th, " History ", true);
-        let inner = block.inner(area);
-        block.render(area, frame);
+        let inner = section(th, " History ", th.accented(), area, frame);
         Paragraph::new(format!("history is unreadable: {e}"))
             .style(th.err())
             .wrap(WrapMode::Word)
@@ -921,21 +942,25 @@ fn history_screen(m: &Tui, area: Rect, frame: &mut Frame) {
         return;
     }
     if m.history.is_empty() {
-        let block = panel(th, " History ", true);
-        let inner = block.inner(area);
-        block.render(area, frame);
+        let inner = section(th, " History ", th.accented(), area, frame);
         Paragraph::new("Nothing yet. Every connect, reconnect and disconnect lands here.")
             .style(th.dimmed())
             .wrap(WrapMode::Word)
             .render(inner, frame);
         return;
     }
+    let selected = m.table.borrow().selected;
     let rows: Vec<TableRow> = m
         .history
         .iter()
-        .map(|h| {
+        .enumerate()
+        .map(|(i, h)| {
             TableRow::new([
-                short_time(&h.at),
+                format!(
+                    "{}{}",
+                    if selected == Some(i) { "▌ " } else { "  " },
+                    short_time(&h.at)
+                ),
                 h.action.name().to_string(),
                 h.target.clone().unwrap_or_else(|| "—".into()),
                 h.server.clone().unwrap_or_else(|| "—".into()),
@@ -949,10 +974,17 @@ fn history_screen(m: &Tui, area: Rect, frame: &mut Frame) {
             ])
         })
         .collect();
+    let inner = section(
+        th,
+        " History — Enter reconnects to that target ",
+        th.accented(),
+        area,
+        frame,
+    );
     let table = Table::new(
         rows,
         [
-            Constraint::Fixed(17),
+            Constraint::Fixed(19),
             Constraint::Fixed(11),
             Constraint::Fixed(14),
             Constraint::Fixed(13),
@@ -968,14 +1000,9 @@ fn history_screen(m: &Tui, area: Rect, frame: &mut Frame) {
         ])
         .style(th.dimmed()),
     )
-    .block(panel(
-        th,
-        " History — Enter reconnects to that target ",
-        true,
-    ))
     .style(th.text())
     .highlight_style(th.selected());
-    StatefulWidget::render(&table, area, frame, &mut m.table.borrow_mut());
+    StatefulWidget::render(&table, inner, frame, &mut m.table.borrow_mut());
 }
 
 // ---------------------------------------------------------------- help
@@ -989,29 +1016,27 @@ fn help(m: &Tui, frame: &mut Frame) {
         return;
     }
     let area = Rect::new(b.x + (b.width - w) / 2, b.y + (b.height - h) / 2, w, h);
-    let blank = Text::from_lines((0..area.height).map(|_| {
-        Line::styled(
-            " ".repeat(area.width as usize),
-            Style::new().bg(th.selection),
-        )
-    }));
+    let blank = Text::from_lines(
+        (0..area.height)
+            .map(|_| Line::styled(" ".repeat(area.width as usize), Style::new().bg(th.panel))),
+    );
     Paragraph::new(blank)
         .wrap(WrapMode::None)
         .render(area, frame);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
+    let block = Block::new()
+        .borders(Borders::ALL)
         .border_style(th.border_focused())
         .title(" Keys — any key closes ")
         .padding(Sides::all(1))
-        .style(Style::new().bg(th.selection));
+        .style(Style::new().bg(th.panel));
     let inner = block.inner(area);
     block.render(area, frame);
     let lines: Vec<Line> = KEYS
         .iter()
         .map(|(k, a)| {
             Line::from_spans([
-                Span::styled(format!("{k:<24}"), th.key().bg(th.selection)),
-                Span::styled((*a).to_string(), th.text().bg(th.selection)),
+                Span::styled(format!("{k:<24}"), th.key().bg(th.panel)),
+                Span::styled((*a).to_string(), th.text().bg(th.panel)),
             ])
         })
         .collect();
