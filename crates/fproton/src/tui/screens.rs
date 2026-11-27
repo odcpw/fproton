@@ -4,6 +4,7 @@
 
 use ftui::layout::{Constraint, Flex, Rect, Sides};
 use ftui::render::cell::Cell;
+use ftui::style::TableTheme;
 use ftui::text::wrap::WrapMode;
 use ftui::text::{Line, Span, Text};
 use ftui::widgets::block::Block;
@@ -62,7 +63,11 @@ pub(super) fn view(m: &Tui, frame: &mut Frame) {
         return;
     }
     let tier = tier_of(b);
-    let header_height = if b.height >= 27 { 3 } else { 1 };
+    let header_height = if b.height >= 20 && b.width >= 60 {
+        3
+    } else {
+        1
+    };
     let rows = Flex::vertical()
         .constraints([
             Constraint::Fixed(header_height),
@@ -117,7 +122,7 @@ fn view_tabs(m: &Tui, area: Rect, frame: &mut Frame, tier: Tier) {
         rect
     };
     label("▥  FPROTON  ", th.key());
-    let compact = tier == Tier::Narrow;
+    let compact = tier == Tier::Narrow || area.width < 63;
     let mut tabs = [Rect::default(); 3];
     for (i, tab) in tabs.iter_mut().enumerate() {
         let screen = Screen::from_index(i);
@@ -140,7 +145,15 @@ fn view_tabs(m: &Tui, area: Rect, frame: &mut Frame, tier: Tier) {
     m.tab_rects.set(tabs);
     if compact {
         label(&format!("  {}", screen_name(m.screen)), th.title());
-    } else {
+    }
+    let keys = if area.width >= 45 { "?  Keys" } else { "?" };
+    let keys_width = keys.width() as u16;
+    let keys_x = area.right() - gutter - keys_width;
+    let help = Rect::new(keys_x, area.y, keys_width, 1);
+    Paragraph::new(keys).style(th.key()).render(help, frame);
+    m.help_rect.set(help);
+
+    if !compact {
         let busy = if m.poll_inflight || m.action.is_some() {
             SPINNER[m.tick % SPINNER.len()]
         } else {
@@ -149,23 +162,16 @@ fn view_tabs(m: &Tui, area: Rect, frame: &mut Frame, tier: Tier) {
         let engine = m.status.as_ref().map_or("", |s| s.engine.as_str());
         let detail = format!("{busy} {engine}  {}", th.name);
         let w = detail.width() as u16;
-        if x + w + gutter < area.right() {
+        if x + w + 2 <= keys_x {
             Paragraph::new(detail)
                 .style(th.dimmed())
-                .render(Rect::new(area.right() - w - gutter, area.y, w, 1), frame);
+                .render(Rect::new(keys_x - 2 - w, area.y, w, 1), frame);
         }
     }
 }
 
 fn view_status_line(m: &Tui, area: Rect, frame: &mut Frame) {
     let th = &m.theme;
-    let help = Rect::new(area.right().saturating_sub(8), area.y, 8.min(area.width), 1);
-    m.help_rect.set(help);
-    Paragraph::new(Text::from_line(Line::from_spans([
-        Span::styled("? ", th.key()),
-        Span::styled("help", th.text()),
-    ])))
-    .render(help, frame);
 
     let state = m.status.as_ref().map_or("unknown", |s| s.state.name());
     let mut spans = vec![
@@ -212,10 +218,9 @@ fn view_status_line(m: &Tui, area: Rect, frame: &mut Frame) {
             if m.note_err { th.err() } else { th.ok() },
         ));
     }
-    let r = Rect::new(area.x, area.y, area.width.saturating_sub(8), 1);
     Paragraph::new(Text::from_line(Line::from_spans(spans)))
         .wrap(WrapMode::None)
-        .render(r, frame);
+        .render(area, frame);
 }
 
 // ---------------------------------------------------------------- Status
@@ -994,6 +999,15 @@ fn history_screen(m: &Tui, area: Rect, frame: &mut Frame) {
             Constraint::Fixed(6),
         ],
     )
+    .theme(TableTheme {
+        header: th.dimmed().bg(th.panel),
+        row: th.text().bg(th.bg),
+        row_alt: th.text().bg(th.bg),
+        row_selected: th.selected(),
+        row_hover: th.text().bg(th.panel),
+        divider: th.border(),
+        ..Default::default()
+    })
     .header(
         TableRow::new([
             "WHEN", "ACTION", "TARGET", "SERVER", "COUNTRY", "ENGINE", "RESULT", "TOOK",

@@ -934,7 +934,7 @@ mod tests {
         assert!(text.contains("Status"), "{text}");
         assert!(text.contains("Servers"), "{text}");
         assert!(text.contains('●'), "state badge missing:\n{text}");
-        assert!(text.contains("help"), "{text}");
+        assert!(text.contains("?  Keys"), "{text}");
     }
 
     #[test]
@@ -960,11 +960,12 @@ mod tests {
             let x = unicode_width::UnicodeWidthStr::width(&line[..byte]) as u16;
             m.update(click(x, y as u16));
             assert_eq!(m.screen, screen);
-            let footer = &rows[h as usize - 1];
-            let byte = footer.find("? help").unwrap();
+            let header = &rows[y];
+            let key = if w >= 45 { "?  Keys" } else { "?" };
+            let byte = header.find(key).unwrap();
             m.update(click(
-                unicode_width::UnicodeWidthStr::width(&footer[..byte]) as u16,
-                h - 1,
+                unicode_width::UnicodeWidthStr::width(&header[..byte]) as u16,
+                y as u16,
             ));
             assert!(m.show_help);
             m.update(click(x, y as u16));
