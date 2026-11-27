@@ -748,7 +748,9 @@ impl RenderItem for ServerItem<'_> {
         );
         let c = self.cols;
         let r = self.row;
-        let bar = MiniBar::new(f64::from(r.load) / 100.0, c.load.saturating_sub(5) as u16);
+        let bar = MiniBar::new(f64::from(r.load) / 100.0, c.load.saturating_sub(5) as u16)
+            .filled_char('━')
+            .empty_char('┄');
         let load_cell = format!("{} {:>3}%", bar.render_string(), r.load);
         let spans = if selected {
             let text = format!(
